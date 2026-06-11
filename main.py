@@ -38,7 +38,7 @@ from sqlalchemy.exc import IntegrityError
 # CONFIGURAÇÃO PRINCIPAL
 # ==================================================
 
-APP_VERSION = "4.1.0-rc2"
+APP_VERSION = "4.1.0-rc3-beta-access"
 DEFAULT_DATABASE_URL = "sqlite:///./database.db"
 DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL)
 
@@ -55,10 +55,10 @@ MERCADOPAGO_ACCESS_TOKEN = os.getenv("MERCADOPAGO_ACCESS_TOKEN", "").strip()
 MERCADOPAGO_WEBHOOK_SECRET = os.getenv("MERCADOPAGO_WEBHOOK_SECRET", "").strip()
 MERCADOPAGO_PAYER_EMAIL_DOMAIN = os.getenv("MERCADOPAGO_PAYER_EMAIL_DOMAIN", "pcultramanager.com.br").strip().lower() or "pcultramanager.com.br"
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://pc-ultra-manager-server.onrender.com").strip().rstrip("/")
-APP_LATEST_VERSION = os.getenv("APP_LATEST_VERSION", "4.1.0-rc2").strip()
-APP_CHANNEL = os.getenv("APP_CHANNEL", "Beta Final RC2").strip()
+APP_LATEST_VERSION = os.getenv("APP_LATEST_VERSION", "4.1.0-rc3-beta-access").strip()
+APP_CHANNEL = os.getenv("APP_CHANNEL", "Acesso Antecipado Beta RC3").strip()
 APP_DOWNLOAD_URL = os.getenv("APP_DOWNLOAD_URL", "").strip()
-APP_CHANGELOG = os.getenv("APP_CHANGELOG", "Dashboard Admin Ultra, suporte online, atividade do usuário e proteção anti-abuso.").strip()
+APP_CHANGELOG = os.getenv("APP_CHANGELOG", "Acesso Antecipado Beta com compra PIX antes do login, Beta Gate melhorado, dashboard, suporte e segurança.").strip()
 
 app = FastAPI(title="PC Ultra Manager Server", version=APP_VERSION)
 security = HTTPBearer(auto_error=False)
@@ -200,6 +200,36 @@ beta_keys = Table(
 )
 
 
+beta_access_orders = Table(
+    "beta_access_orders",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("order_token", Text, unique=True, nullable=False, index=True),
+    Column("buyer_name", String(120), nullable=True),
+    Column("buyer_email", String(180), nullable=True),
+    Column("device_id", Text, nullable=True),
+    Column("option_name", String(120), nullable=False),
+    Column("duration_label", String(80), nullable=False),
+    Column("expires_days", Integer, nullable=True),
+    Column("permanent", Boolean, nullable=False, default=False),
+    Column("price_cents", Integer, nullable=False),
+    Column("status", String(30), nullable=False, default="payment_pending"),
+    Column("payment_provider", String(40), nullable=True),
+    Column("payment_id", String(120), nullable=True),
+    Column("payment_status", String(60), nullable=True),
+    Column("payment_qr_code", Text, nullable=True),
+    Column("payment_qr_code_base64", Text, nullable=True),
+    Column("payment_ticket_url", Text, nullable=True),
+    Column("payment_created_at", DateTime(timezone=True), nullable=True),
+    Column("payment_paid_at", DateTime(timezone=True), nullable=True),
+    Column("beta_key_code", Text, nullable=True),
+    Column("beta_key_id", Integer, ForeignKey("beta_keys.id"), nullable=True),
+    Column("message", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: now_utc()),
+    Column("delivered_at", DateTime(timezone=True), nullable=True),
+)
+
+
 support_tickets = Table(
     "support_tickets",
     metadata,
@@ -293,6 +323,37 @@ PLAN_CATALOG = {
         {"option_name": "Permanente Elite", "duration_label": "Vitalício", "duration_minutes": None, "permanent": True, "price_cents": 10000},
     ],
 }
+
+
+BETA_ACCESS_CATALOG = [
+    {"option_name": "Beta Diário", "duration_label": "1 dia", "expires_days": 1, "permanent": False, "price_cents": 50},
+    {"option_name": "Beta Semanal", "duration_label": "7 dias", "expires_days": 7, "permanent": False, "price_cents": 150},
+    {"option_name": "Beta 15 dias", "duration_label": "15 dias", "expires_days": 15, "permanent": False, "price_cents": 250},
+    {"option_name": "Beta 30 dias", "duration_label": "30 dias", "expires_days": 30, "permanent": False, "price_cents": 499},
+    {"option_name": "Beta Permanente", "duration_label": "Permanente da Beta", "expires_days": None, "permanent": True, "price_cents": 1000},
+]
+
+
+def beta_access_catalog_public() -> Dict[str, Any]:
+    return {
+        "title": "Acesso Antecipado Beta",
+        "channel": APP_CHANNEL,
+        "description": "Acesso fechado antes do login. Compre uma key beta via PIX ou use uma key enviada pelo admin.",
+        "options": [{**option, "price_label": price_label(option["price_cents"])} for option in BETA_ACCESS_CATALOG],
+    }
+
+
+def find_beta_access_option(option_name: str, expires_days: Optional[int], permanent: bool, price_cents: int) -> Dict[str, Any]:
+    normalized_name = str(option_name or "").strip().casefold()
+    for option in BETA_ACCESS_CATALOG:
+        same_name = option["option_name"].casefold() == normalized_name
+        same_price = int(option["price_cents"]) == int(price_cents)
+        same_permanent = bool(option["permanent"]) == bool(permanent)
+        option_days = option.get("expires_days")
+        same_duration = (option_days is None and expires_days in (None, 0, -1)) or (option_days == expires_days)
+        if same_name and same_price and same_permanent and same_duration:
+            return option
+    raise HTTPException(status_code=400, detail="Opção de acesso beta inválida ou valor diferente do catálogo")
 
 
 def price_label(price_cents: int) -> str:
@@ -484,6 +545,34 @@ def serialize_beta_key(row: Any) -> Dict[str, Any]:
     }
 
 
+def serialize_beta_access_order(row: Any) -> Dict[str, Any]:
+    data = row_dict(row)
+    return {
+        "id": data.get("id"),
+        "buyer_name": data.get("buyer_name"),
+        "buyer_email": data.get("buyer_email"),
+        "option_name": data.get("option_name"),
+        "duration_label": data.get("duration_label"),
+        "expires_days": data.get("expires_days"),
+        "permanent": bool(data.get("permanent")),
+        "price_cents": int(data.get("price_cents") or 0),
+        "price_label": price_label(int(data.get("price_cents") or 0)),
+        "status": data.get("status"),
+        "payment_provider": data.get("payment_provider"),
+        "payment_id": data.get("payment_id"),
+        "payment_status": data.get("payment_status"),
+        "payment_qr_code": data.get("payment_qr_code"),
+        "payment_qr_code_base64": data.get("payment_qr_code_base64"),
+        "payment_ticket_url": data.get("payment_ticket_url"),
+        "beta_key_code": data.get("beta_key_code") if data.get("status") == "delivered" else None,
+        "message": data.get("message"),
+        "created_at": serialize_dt(data.get("created_at")),
+        "payment_created_at": serialize_dt(data.get("payment_created_at")),
+        "payment_paid_at": serialize_dt(data.get("payment_paid_at")),
+        "delivered_at": serialize_dt(data.get("delivered_at")),
+    }
+
+
 def user_license_payload(user: Dict[str, Any]) -> Dict[str, Any]:
     plan = normalize_plan(user.get("plan", "free"))
     premium_until = user.get("premium_until")
@@ -608,6 +697,17 @@ class RevokePlanRequest(BaseModel):
     user_id: int
     message: str = "Plano revogado pelo administrador."
 
+
+
+class CreateBetaAccessOrderRequest(BaseModel):
+    option_name: str
+    duration_label: Optional[str] = None
+    expires_days: Optional[int] = None
+    permanent: bool = False
+    price_cents: int
+    buyer_name: Optional[str] = None
+    buyer_email: Optional[str] = None
+    device_id: Optional[str] = None
 
 
 class CreateOrderRequest(BaseModel):
@@ -914,6 +1014,96 @@ def my_support_tickets(user: Dict[str, Any] = Depends(get_user_by_token)):
 # ROTAS DE BETA FECHADA
 # ==================================================
 
+@app.get("/beta/access-plans")
+def beta_access_plans():
+    return beta_access_catalog_public()
+
+
+@app.post("/beta/access-orders/create")
+def create_beta_access_order(data: CreateBetaAccessOrderRequest):
+    option = find_beta_access_option(data.option_name, data.expires_days, data.permanent, data.price_cents)
+    if int(option["price_cents"]) <= 0:
+        raise HTTPException(status_code=400, detail="Valor beta inválido")
+
+    if not mercadopago_enabled():
+        raise HTTPException(status_code=503, detail="Mercado Pago não configurado para compra automática de Acesso Antecipado Beta")
+
+    order_token = secrets.token_urlsafe(28)
+    buyer_name = str(data.buyer_name or "Beta Tester").strip()[:120] or "Beta Tester"
+    buyer_email = valid_email_or_technical(data.buyer_email, buyer_name)
+    with engine.begin() as conn:
+        result = conn.execute(
+            beta_access_orders.insert().values(
+                order_token=order_token,
+                buyer_name=buyer_name,
+                buyer_email=buyer_email,
+                device_id=str(data.device_id or "")[:500],
+                option_name=option["option_name"],
+                duration_label=option["duration_label"],
+                expires_days=option.get("expires_days"),
+                permanent=bool(option.get("permanent")),
+                price_cents=int(option["price_cents"]),
+                status="payment_pending",
+                payment_provider="mercadopago",
+                payment_status="pending",
+                created_at=now_utc(),
+            )
+        )
+        order_id = result.inserted_primary_key[0]
+
+    payment_payload = create_mp_pix_payment_public(
+        external_reference=f"beta:{order_id}",
+        amount_cents=int(option["price_cents"]),
+        description=f"PC Ultra Manager - Acesso Antecipado Beta {option['duration_label']}",
+        payer_email=buyer_email,
+        payer_name=buyer_name,
+        idempotency_prefix=f"beta-order-{order_id}",
+    )
+
+    with engine.begin() as conn:
+        conn.execute(
+            update(beta_access_orders)
+            .where(beta_access_orders.c.id == order_id)
+            .values(
+                payment_id=payment_payload.get("payment_id"),
+                payment_status=payment_payload.get("payment_status"),
+                payment_qr_code=payment_payload.get("payment_qr_code"),
+                payment_qr_code_base64=payment_payload.get("payment_qr_code_base64"),
+                payment_ticket_url=payment_payload.get("payment_ticket_url"),
+                payment_created_at=now_utc(),
+            )
+        )
+
+    return {
+        "message": "PIX do Acesso Antecipado Beta criado. Pague para receber a key beta automaticamente.",
+        "order_id": order_id,
+        "order_token": order_token,
+        "status": "payment_pending",
+        "title": "Acesso Antecipado Beta",
+        "option_name": option["option_name"],
+        "duration_label": option["duration_label"],
+        "expires_days": option.get("expires_days"),
+        "permanent": bool(option.get("permanent")),
+        "price_cents": option["price_cents"],
+        "price_label": price_label(option["price_cents"]),
+        **payment_payload,
+    }
+
+
+@app.get("/beta/access-orders/{order_id}/status")
+def beta_access_order_status(order_id: int, token: str = Query(...)):
+    with engine.connect() as conn:
+        found = conn.execute(
+            select(beta_access_orders).where(beta_access_orders.c.id == order_id, beta_access_orders.c.order_token == str(token))
+        ).first()
+        if not found:
+            raise HTTPException(status_code=404, detail="Pedido beta não encontrado")
+        order = row_dict(found)
+    if order.get("payment_provider") == "mercadopago" and order.get("payment_id") and order.get("status") != "delivered":
+        return sync_mp_payment_for_beta_order(order_id, token)
+    return {"order": serialize_beta_access_order(order), "payment_checked": False}
+
+
 @app.post("/beta/verify")
 def verify_beta_key(data: VerifyBetaRequest):
     beta_plain = str(data.key or "").strip()
@@ -953,6 +1143,7 @@ def verify_beta_key(data: VerifyBetaRequest):
         "display_name": beta.get("display_name"),
         "access_level": beta.get("access_level") or "closed_beta",
         "remaining_uses": max(0, int(beta.get("max_uses") or 0) - current_uses) if int(beta.get("max_uses") or 0) > 0 else None,
+        "expires_at": serialize_dt(beta.get("expires_at")),
         "server_time": serialize_dt(now_utc()),
     }
 
@@ -1341,6 +1532,39 @@ def make_mp_payer_email(user: Dict[str, Any]) -> str:
     return f"{local}.{user_id}@{domain}"
 
 
+def valid_email_or_technical(email: Optional[str], fallback_name: str = "beta") -> str:
+    candidate = str(email or "").strip().lower()
+    if re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", candidate):
+        return candidate[:180]
+    local = re.sub(r"[^a-z0-9._+-]+", ".", str(fallback_name or "cliente").strip().lower()).strip("._+-") or "cliente"
+    if "." not in MERCADOPAGO_PAYER_EMAIL_DOMAIN or "@" in MERCADOPAGO_PAYER_EMAIL_DOMAIN:
+        domain = "pcultramanager.com.br"
+    else:
+        domain = MERCADOPAGO_PAYER_EMAIL_DOMAIN
+    return f"{local[:36]}.{secrets.token_hex(3)}@{domain}"
+
+
+def create_mp_pix_payment_public(external_reference: str, amount_cents: int, description: str, payer_email: str, payer_name: str, idempotency_prefix: str) -> Dict[str, Any]:
+    amount = round(int(amount_cents) / 100, 2)
+    payload = {
+        "transaction_amount": amount,
+        "description": str(description or "PC Ultra Manager")[:250],
+        "payment_method_id": "pix",
+        "external_reference": str(external_reference),
+        "payer": {"email": payer_email, "first_name": str(payer_name or "Cliente")[:60]},
+        "notification_url": f"{PUBLIC_BASE_URL}/payments/mercadopago/webhook",
+    }
+    payment = mp_request("POST", "/v1/payments", payload, idempotency_key=f"{idempotency_prefix}-{secrets.token_hex(8)}")
+    tx = (payment.get("point_of_interaction") or {}).get("transaction_data") or {}
+    return {
+        "payment_id": str(payment.get("id") or ""),
+        "payment_status": payment.get("status") or "pending",
+        "payment_qr_code": tx.get("qr_code"),
+        "payment_qr_code_base64": tx.get("qr_code_base64"),
+        "payment_ticket_url": tx.get("ticket_url"),
+    }
+
+
 def create_mp_pix_payment(order_id: int, user: Dict[str, Any], option: Dict[str, Any], plan: str) -> Dict[str, Any]:
     amount = round(int(option["price_cents"]) / 100, 2)
     description = f"PC Ultra Manager - {public_plan_name(plan)} {option['duration_label']}"
@@ -1405,6 +1629,96 @@ def sync_mp_payment_for_order(order_id: int) -> Dict[str, Any]:
             delivered = deliver_order(conn, order, None, "Pagamento PIX aprovado pelo Mercado Pago. Plano entregue automaticamente.")
         updated = conn.execute(select(orders).where(orders.c.id == order_id)).first()
         return {"order": serialize_order(updated), "payment_checked": True, "mercadopago_status": status, "delivered": delivered}
+
+
+def generate_beta_access_key_code() -> str:
+    return "BETA-ACCESS-" + secrets.token_hex(5).upper()
+
+
+def deliver_beta_access_order(conn, order: Dict[str, Any]) -> Dict[str, Any]:
+    if order.get("status") == "delivered" and order.get("beta_key_code"):
+        return {"already_delivered": True, "beta_key_code": order.get("beta_key_code")}
+
+    key_code = order.get("beta_key_code") or generate_beta_access_key_code()
+    expires_at = None
+    if not bool(order.get("permanent")):
+        days = int(order.get("expires_days") or 1)
+        expires_at = now_utc() + timedelta(days=days)
+
+    key_id = order.get("beta_key_id")
+    if not key_id:
+        try:
+            result = conn.execute(
+                beta_keys.insert().values(
+                    key_hash=hash_text(key_code),
+                    display_name=f"Acesso Antecipado Beta - {order.get('duration_label')}",
+                    access_level="early_access_beta",
+                    max_uses=1,
+                    current_uses=0,
+                    revoked=False,
+                    message="Acesso Antecipado Beta liberado por pagamento PIX.",
+                    expires_at=expires_at,
+                    created_at=now_utc(),
+                )
+            )
+            key_id = result.inserted_primary_key[0]
+        except IntegrityError:
+            key_code = generate_beta_access_key_code()
+            result = conn.execute(
+                beta_keys.insert().values(
+                    key_hash=hash_text(key_code),
+                    display_name=f"Acesso Antecipado Beta - {order.get('duration_label')}",
+                    access_level="early_access_beta",
+                    max_uses=1,
+                    current_uses=0,
+                    revoked=False,
+                    message="Acesso Antecipado Beta liberado por pagamento PIX.",
+                    expires_at=expires_at,
+                    created_at=now_utc(),
+                )
+            )
+            key_id = result.inserted_primary_key[0]
+
+    conn.execute(
+        update(beta_access_orders)
+        .where(beta_access_orders.c.id == order["id"])
+        .values(
+            status="delivered",
+            payment_paid_at=order.get("payment_paid_at") or now_utc(),
+            delivered_at=now_utc(),
+            beta_key_code=key_code,
+            beta_key_id=key_id,
+            message="Pagamento aprovado. Key de Acesso Antecipado Beta entregue automaticamente.",
+        )
+    )
+    add_app_log(conn, None, "beta_access_delivered", f"pedido_beta={order['id']}; {order.get('duration_label')}; {price_label(order.get('price_cents') or 0)}")
+    return {"beta_key_code": key_code, "expires_at": serialize_dt(expires_at), "permanent": bool(order.get("permanent"))}
+
+
+def sync_mp_payment_for_beta_order(order_id: int, order_token: Optional[str] = None) -> Dict[str, Any]:
+    with engine.begin() as conn:
+        query = select(beta_access_orders).where(beta_access_orders.c.id == order_id)
+        if order_token is not None:
+            query = query.where(beta_access_orders.c.order_token == str(order_token))
+        found = conn.execute(query).first()
+        if not found:
+            raise HTTPException(status_code=404, detail="Pedido beta não encontrado")
+        order = row_dict(found)
+        payment_id = order.get("payment_id")
+        if not payment_id:
+            return {"order": serialize_beta_access_order(order), "payment_checked": False, "message": "Pedido beta sem pagamento Mercado Pago"}
+        payment = mp_request("GET", f"/v1/payments/{payment_id}")
+        status = payment.get("status") or order.get("payment_status") or "pending"
+        values = {"payment_status": status}
+        if status in {"approved", "accredited"}:
+            values["payment_paid_at"] = now_utc()
+        conn.execute(update(beta_access_orders).where(beta_access_orders.c.id == order_id).values(**values))
+        order.update(values)
+        delivered = None
+        if status in {"approved", "accredited"} and order.get("status") != "delivered":
+            delivered = deliver_beta_access_order(conn, order)
+        updated = conn.execute(select(beta_access_orders).where(beta_access_orders.c.id == order_id)).first()
+        return {"order": serialize_beta_access_order(updated), "payment_checked": True, "mercadopago_status": status, "delivered": delivered}
 
 
 @app.post("/orders/create")
@@ -1534,6 +1848,26 @@ async def mercadopago_webhook(request: Request):
     status = payment.get("status") or "pending"
     if not external_reference:
         return {"ok": True, "ignored": True, "reason": "sem external_reference", "payment_status": status}
+    external_reference = str(external_reference)
+    if external_reference.startswith("beta:"):
+        try:
+            beta_order_id = int(external_reference.split(":", 1)[1])
+        except Exception:
+            return {"ok": True, "ignored": True, "reason": "external_reference beta inválida", "payment_status": status}
+        with engine.begin() as conn:
+            found = conn.execute(select(beta_access_orders).where(beta_access_orders.c.id == beta_order_id)).first()
+            if not found:
+                return {"ok": True, "ignored": True, "reason": "pedido beta não encontrado", "payment_status": status}
+            order = row_dict(found)
+            conn.execute(update(beta_access_orders).where(beta_access_orders.c.id == beta_order_id).values(payment_status=status))
+            delivered = None
+            if status in {"approved", "accredited"} and order.get("status") != "delivered":
+                order["payment_status"] = status
+                order["payment_paid_at"] = now_utc()
+                delivered = deliver_beta_access_order(conn, order)
+            add_app_log(conn, None, "mercadopago_beta_webhook", f"payment={payment_id}; status={status}; event={event_type}; beta_order={beta_order_id}")
+        return {"ok": True, "beta_order_id": beta_order_id, "payment_status": status, "delivered": delivered}
+
     try:
         order_id = int(external_reference)
     except Exception:
@@ -1550,6 +1884,16 @@ async def mercadopago_webhook(request: Request):
             delivered = deliver_order(conn, order, None, "Pagamento PIX aprovado pelo Mercado Pago. Plano entregue automaticamente.")
         add_app_log(conn, order.get("user_id"), "mercadopago_webhook", f"payment={payment_id}; status={status}; event={event_type}")
     return {"ok": True, "order_id": order_id, "payment_status": status, "delivered": delivered}
+
+
+@app.get("/admin/beta-access-orders")
+def admin_beta_access_orders(status: str = Query("todos"), admin: Dict[str, Any] = Depends(require_admin)):
+    with engine.connect() as conn:
+        query = select(beta_access_orders).order_by(beta_access_orders.c.id.desc()).limit(300)
+        if status and status != "todos":
+            query = query.where(beta_access_orders.c.status == status)
+        rows = conn.execute(query).fetchall()
+    return {"orders": [serialize_beta_access_order(row) for row in rows]}
 
 
 @app.get("/admin/orders")
@@ -1946,6 +2290,8 @@ def admin_dashboard(admin: Dict[str, Any] = Depends(require_admin)):
         key_used = int(conn.execute(select(func.count()).select_from(license_keys).where(license_keys.c.is_used == True)).scalar_one() or 0)  # noqa: E712
         key_revoked = int(conn.execute(select(func.count()).select_from(license_keys).where(license_keys.c.revoked == True)).scalar_one() or 0)  # noqa: E712
         beta_total = int(conn.execute(select(func.count()).select_from(beta_keys)).scalar_one() or 0)
+        beta_access_orders_total = int(conn.execute(select(func.count()).select_from(beta_access_orders)).scalar_one() or 0)
+        beta_access_orders_delivered = int(conn.execute(select(func.count()).select_from(beta_access_orders).where(beta_access_orders.c.status == "delivered")).scalar_one() or 0)
         orders_total = int(conn.execute(select(func.count()).select_from(orders)).scalar_one() or 0)
         orders_pending = int(conn.execute(select(func.count()).select_from(orders).where(orders.c.status.in_(["pending", "payment_pending"]))).scalar_one() or 0)
         orders_delivered = int(conn.execute(select(func.count()).select_from(orders).where(orders.c.status == "delivered")).scalar_one() or 0)
@@ -1961,7 +2307,7 @@ def admin_dashboard(admin: Dict[str, Any] = Depends(require_admin)):
     return {
         "users": {"total": total_users, "disabled": disabled_users, **plan_counts},
         "keys": {"total": key_total, "used": key_used, "available": max(0, key_total - key_used - key_revoked), "revoked": key_revoked},
-        "beta": {"total": beta_total},
+        "beta": {"total": beta_total, "access_orders": beta_access_orders_total, "access_delivered": beta_access_orders_delivered},
         "orders": {"total": orders_total, "pending": orders_pending, "delivered": orders_delivered, "revenue_cents": revenue_cents, "revenue_label": price_label(revenue_cents)},
         "support": {"open": tickets_open, "latest": [serialize_ticket(row, username=row_dict(row).get("username")) for row in latest_tickets]},
         "security": {"events_24h": security_recent},
