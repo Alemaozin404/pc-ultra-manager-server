@@ -55,7 +55,6 @@ Variáveis obrigatórias no Render para pagamento automático:
 PAYMENT_PROVIDER=mercadopago
 MERCADOPAGO_ACCESS_TOKEN=APP_USR-SEU_TOKEN-DE-PRODUCAO
 MERCADOPAGO_WEBHOOK_SECRET=SUA_ASSINATURA_SECRETA
-MERCADOPAGO_WEBHOOK_TOLERANCE_SECONDS=600
 PUBLIC_BASE_URL=https://pc-ultra-manager-server.onrender.com
 ```
 
@@ -65,7 +64,7 @@ Webhook no Mercado Pago:
 https://pc-ultra-manager-server.onrender.com/payments/mercadopago/webhook
 ```
 
-Evento principal necessário: Pagamentos. Com `MERCADOPAGO_WEBHOOK_SECRET` configurado, o servidor valida o header `x-signature` antes de consultar e entregar o pagamento.
+Evento principal necessário: Pagamentos.
 
 Fluxo: o app cria pedido, o servidor cria cobrança PIX no Mercado Pago, o app mostra QR Code/Copia e Cola, o webhook confirma pagamento e o servidor entrega o plano automaticamente.
 

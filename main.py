@@ -53,7 +53,6 @@ SESSION_DAYS = int(os.getenv("SESSION_DAYS", "30"))
 PAYMENT_PROVIDER = os.getenv("PAYMENT_PROVIDER", "manual").strip().casefold()
 MERCADOPAGO_ACCESS_TOKEN = os.getenv("MERCADOPAGO_ACCESS_TOKEN", "").strip()
 MERCADOPAGO_WEBHOOK_SECRET = os.getenv("MERCADOPAGO_WEBHOOK_SECRET", "").strip()
-MERCADOPAGO_WEBHOOK_TOLERANCE_SECONDS = int(os.getenv("MERCADOPAGO_WEBHOOK_TOLERANCE_SECONDS", "600"))
 MERCADOPAGO_PAYER_EMAIL_DOMAIN = os.getenv("MERCADOPAGO_PAYER_EMAIL_DOMAIN", "pcultramanager.com.br").strip().lower() or "pcultramanager.com.br"
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://pc-ultra-manager-server.onrender.com").strip().rstrip("/")
 APP_LATEST_VERSION = os.getenv("APP_LATEST_VERSION", "4.1.0-rc3-beta-access").strip()
@@ -936,14 +935,7 @@ def home():
 def health():
     with engine.connect() as conn:
         conn.execute(select(func.count()).select_from(users)).scalar_one()
-    return {
-        "ok": True,
-        "time": serialize_dt(now_utc()),
-        "database": "postgresql" if DATABASE_URL.startswith("postgresql") else "sqlite",
-        "payment_provider": PAYMENT_PROVIDER,
-        "mercadopago_configured": bool(MERCADOPAGO_ACCESS_TOKEN),
-        "mercadopago_webhook_signature": bool(MERCADOPAGO_WEBHOOK_SECRET),
-    }
+    return {"ok": True, "time": serialize_dt(now_utc())}
 
 
 @app.get("/updates/check")
@@ -1059,23 +1051,14 @@ def create_beta_access_order(data: CreateBetaAccessOrderRequest):
         )
         order_id = result.inserted_primary_key[0]
 
-    try:
-        payment_payload = create_mp_pix_payment_public(
-            external_reference=f"beta:{order_id}",
-            amount_cents=int(option["price_cents"]),
-            description=f"PC Ultra Manager - Acesso Antecipado Beta {option['duration_label']}",
-            payer_email=buyer_email,
-            payer_name=buyer_name,
-            idempotency_prefix=f"beta-order-{order_id}",
-        )
-    except Exception:
-        with engine.begin() as conn:
-            conn.execute(
-                update(beta_access_orders)
-                .where(beta_access_orders.c.id == order_id)
-                .values(status="payment_error", payment_status="error")
-            )
-        raise
+    payment_payload = create_mp_pix_payment_public(
+        external_reference=f"beta:{order_id}",
+        amount_cents=int(option["price_cents"]),
+        description=f"PC Ultra Manager - Acesso Antecipado Beta {option['duration_label']}",
+        payer_email=buyer_email,
+        payer_name=buyer_name,
+        idempotency_prefix=f"beta-order-{order_id}",
+    )
 
     with engine.begin() as conn:
         conn.execute(
@@ -1531,76 +1514,6 @@ def mp_request(method: str, path: str, payload: Optional[Dict[str, Any]] = None,
         raise HTTPException(status_code=502, detail=f"Falha ao comunicar com Mercado Pago: {exc}")
 
 
-def _parse_mp_signature_header(value: str) -> Dict[str, str]:
-    parts: Dict[str, str] = {}
-    for item in str(value or "").split(","):
-        if "=" not in item:
-            continue
-        key, raw = item.split("=", 1)
-        parts[key.strip()] = raw.strip()
-    return parts
-
-
-def _mp_webhook_data_id(request: Request, body: Any) -> str:
-    data_id = request.query_params.get("data.id") or request.query_params.get("id")
-    if not data_id and isinstance(body, dict):
-        data = body.get("data")
-        if isinstance(data, dict):
-            data_id = data.get("id")
-        data_id = data_id or body.get("id")
-        resource = str(body.get("resource") or "")
-        if not data_id and "/payments/" in resource:
-            data_id = resource.rstrip("/").rsplit("/", 1)[-1]
-    return str(data_id or "").strip().lower()
-
-
-def validate_mp_webhook_signature(request: Request, body: Any) -> Tuple[bool, str]:
-    """Valida x-signature do Mercado Pago quando MERCADOPAGO_WEBHOOK_SECRET está configurado."""
-    if not MERCADOPAGO_WEBHOOK_SECRET:
-        return True, "webhook_secret_not_configured"
-
-    signature = request.headers.get("x-signature") or request.headers.get("X-Signature") or ""
-    request_id = request.headers.get("x-request-id") or request.headers.get("X-Request-Id") or ""
-    parsed = _parse_mp_signature_header(signature)
-    ts = parsed.get("ts")
-    v1 = parsed.get("v1")
-    data_id = _mp_webhook_data_id(request, body)
-
-    if not signature or not ts or not v1:
-        return False, "missing_x_signature"
-
-    manifest = ""
-    if data_id:
-        manifest += f"id:{data_id};"
-    if request_id:
-        manifest += f"request-id:{request_id};"
-    if ts:
-        manifest += f"ts:{ts};"
-
-    if not manifest:
-        return False, "empty_signature_manifest"
-
-    expected = hmac.new(
-        MERCADOPAGO_WEBHOOK_SECRET.encode("utf-8"),
-        manifest.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    if not hmac.compare_digest(expected, v1):
-        return False, "invalid_signature"
-
-    # O timestamp pode vir em milissegundos. Tolerância evita replay simples.
-    try:
-        ts_number = int(str(ts))
-        ts_seconds = ts_number / 1000 if ts_number > 10_000_000_000 else ts_number
-        drift = abs(now_utc().timestamp() - ts_seconds)
-        if MERCADOPAGO_WEBHOOK_TOLERANCE_SECONDS > 0 and drift > MERCADOPAGO_WEBHOOK_TOLERANCE_SECONDS:
-            return False, "signature_timestamp_out_of_tolerance"
-    except Exception:
-        return False, "invalid_signature_timestamp"
-
-    return True, "signature_ok"
-
-
 def make_mp_payer_email(user: Dict[str, Any]) -> str:
     """Mercado Pago exige um payer.email em formato público válido.
 
@@ -1641,7 +1554,7 @@ def create_mp_pix_payment_public(external_reference: str, amount_cents: int, des
         "payer": {"email": payer_email, "first_name": str(payer_name or "Cliente")[:60]},
         "notification_url": f"{PUBLIC_BASE_URL}/payments/mercadopago/webhook",
     }
-    payment = mp_request("POST", "/v1/payments", payload, idempotency_key=idempotency_prefix)
+    payment = mp_request("POST", "/v1/payments", payload, idempotency_key=f"{idempotency_prefix}-{secrets.token_hex(8)}")
     tx = (payment.get("point_of_interaction") or {}).get("transaction_data") or {}
     return {
         "payment_id": str(payment.get("id") or ""),
@@ -1664,7 +1577,7 @@ def create_mp_pix_payment(order_id: int, user: Dict[str, Any], option: Dict[str,
         "payer": {"email": payer_email, "first_name": str(user.get("username") or "Cliente")[:60]},
         "notification_url": f"{PUBLIC_BASE_URL}/payments/mercadopago/webhook",
     }
-    payment = mp_request("POST", "/v1/payments", payload, idempotency_key=f"order-{order_id}")
+    payment = mp_request("POST", "/v1/payments", payload, idempotency_key=f"order-{order_id}-{secrets.token_hex(8)}")
     tx = (payment.get("point_of_interaction") or {}).get("transaction_data") or {}
     return {
         "payment_id": str(payment.get("id") or ""),
@@ -1856,16 +1769,7 @@ def create_order(data: CreateOrderRequest, user: Dict[str, Any] = Depends(get_us
     message = "Pedido enviado para análise do admin"
     status = "pending"
     if mercadopago_enabled():
-        try:
-            payment_payload = create_mp_pix_payment(order_id, user, option, plan)
-        except Exception:
-            with engine.begin() as conn:
-                conn.execute(
-                    update(orders)
-                    .where(orders.c.id == order_id)
-                    .values(status="payment_error", payment_status="error")
-                )
-            raise
+        payment_payload = create_mp_pix_payment(order_id, user, option, plan)
         with engine.begin() as conn:
             conn.execute(
                 update(orders)
@@ -1926,30 +1830,19 @@ def order_payment_status(order_id: int, user: Dict[str, Any] = Depends(get_user_
 
 @app.post("/payments/mercadopago/webhook")
 async def mercadopago_webhook(request: Request):
-    # Segurança: o payload não libera plano sozinho. Quando configurado, validamos
-    # x-signature e depois consultamos o pagamento diretamente no Mercado Pago.
+    # Segurança: não confiamos no payload para liberar plano. Usamos o ID recebido
+    # apenas para consultar o pagamento diretamente na API do Mercado Pago.
     try:
         body = await request.json()
     except Exception:
         body = {}
-
-    signature_ok, signature_reason = validate_mp_webhook_signature(request, body)
-    if not signature_ok:
-        raise HTTPException(status_code=401, detail=f"Webhook Mercado Pago inválido: {signature_reason}")
-
     payment_id = None
     if isinstance(body, dict):
-        data = body.get("data")
-        if isinstance(data, dict):
-            payment_id = data.get("id")
-        payment_id = payment_id or body.get("id")
-        resource = str(body.get("resource") or "")
-        if not payment_id and "/payments/" in resource:
-            payment_id = resource.rstrip("/").rsplit("/", 1)[-1]
+        payment_id = (body.get("data") or {}).get("id") or body.get("id")
     payment_id = payment_id or request.query_params.get("data.id") or request.query_params.get("id")
-    event_type = request.query_params.get("type") or request.query_params.get("topic") or (body.get("type") if isinstance(body, dict) else None) or (body.get("topic") if isinstance(body, dict) else None)
+    event_type = request.query_params.get("type") or (body.get("type") if isinstance(body, dict) else None)
     if not payment_id:
-        return {"ok": True, "ignored": True, "reason": "sem payment id", "signature": signature_reason}
+        return {"ok": True, "ignored": True, "reason": "sem payment id"}
     payment = mp_request("GET", f"/v1/payments/{payment_id}")
     external_reference = payment.get("external_reference")
     status = payment.get("status") or "pending"
@@ -1966,7 +1859,7 @@ async def mercadopago_webhook(request: Request):
             if not found:
                 return {"ok": True, "ignored": True, "reason": "pedido beta não encontrado", "payment_status": status}
             order = row_dict(found)
-            conn.execute(update(beta_access_orders).where(beta_access_orders.c.id == beta_order_id).values(**({"payment_status": status, "payment_paid_at": now_utc()} if status in {"approved", "accredited"} else {"payment_status": status})))
+            conn.execute(update(beta_access_orders).where(beta_access_orders.c.id == beta_order_id).values(payment_status=status))
             delivered = None
             if status in {"approved", "accredited"} and order.get("status") != "delivered":
                 order["payment_status"] = status
@@ -1984,7 +1877,7 @@ async def mercadopago_webhook(request: Request):
         if not found:
             return {"ok": True, "ignored": True, "reason": "pedido não encontrado", "payment_status": status}
         order = row_dict(found)
-        conn.execute(update(orders).where(orders.c.id == order_id).values(**({"payment_status": status, "payment_paid_at": now_utc()} if status in {"approved", "accredited"} else {"payment_status": status})))
+        conn.execute(update(orders).where(orders.c.id == order_id).values(payment_status=status))
         delivered = None
         if status in {"approved", "accredited"} and order.get("status") != "delivered":
             order["payment_status"] = status
