@@ -1,3 +1,8 @@
+databases:
+  - name: pc-ultra-manager-db
+    databaseName: pc_ultra_manager
+    user: pc_ultra_manager
+
 services:
   - type: web
     name: pc-ultra-manager-server
@@ -7,9 +12,35 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: pc-ultra-manager-db
+          property: connectionString
       - key: JWT_SECRET
         generateValue: true
+      - key: ADMIN_USERNAME
+        value: admin
+      - key: ADMIN_PASSWORD
+        sync: false
       - key: SESSION_DAYS
         value: 30
       - key: CORS_ORIGINS
-        value: "*"
+        value: https://pc-ultra-manager-server.onrender.com,https://alemaozin404.github.io
+      - key: PAYMENT_PROVIDER
+        value: mercadopago
+      - key: MERCADOPAGO_ACCESS_TOKEN
+        sync: false
+      - key: MERCADOPAGO_WEBHOOK_SECRET
+        sync: false
+      - key: PUBLIC_BASE_URL
+        value: https://pc-ultra-manager-server.onrender.com
+      - key: MERCADOPAGO_PAYER_EMAIL_DOMAIN
+        value: pcultramanager.com.br
+      - key: MERCADOPAGO_WEBHOOK_TOLERANCE_SECONDS
+        value: 900
+      - key: CREATE_TEST_KEY
+        value: false
+      - key: SYNC_ADMIN_PASSWORD
+        value: true

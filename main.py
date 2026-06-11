@@ -39,7 +39,7 @@ from sqlalchemy.exc import IntegrityError
 # CONFIGURAÇÃO PRINCIPAL
 # ==================================================
 
-APP_VERSION = "4.1.1-security-env"
+APP_VERSION = "4.2.0-themes-store"
 DEFAULT_DATABASE_URL = "sqlite:///./database.db"
 SAFE_DEV_ADMIN_PASSWORD = "admin123456"
 SAFE_DEV_JWT_SECRET = "dev-only-change-this-secret-local-000000000000"
@@ -335,6 +335,95 @@ security_events = Table(
     Column("details", Text, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: now_utc()),
 )
+
+# Loja de temas: permite um site separado vender temas usando o mesmo login do app.
+themes = Table(
+    "themes",
+    metadata,
+    Column("id", String(80), primary_key=True),
+    Column("name", String(120), nullable=False),
+    Column("description", Text, nullable=True),
+    Column("price_cents", Integer, nullable=False, default=0),
+    Column("preview_url", Text, nullable=True),
+    Column("accent_color", String(40), nullable=True),
+    Column("category", String(80), nullable=False, default="premium"),
+    Column("is_active", Boolean, nullable=False, default=True),
+    Column("created_by", Integer, ForeignKey("users.id"), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: now_utc()),
+    Column("updated_at", DateTime(timezone=True), nullable=True),
+)
+
+theme_orders = Table(
+    "theme_orders",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", Integer, ForeignKey("users.id"), nullable=False),
+    Column("theme_id", String(80), ForeignKey("themes.id"), nullable=False),
+    Column("theme_name", String(120), nullable=False),
+    Column("price_cents", Integer, nullable=False),
+    Column("status", String(30), nullable=False, default="pending"),
+    Column("buyer_name", String(120), nullable=True),
+    Column("buyer_email", String(180), nullable=True),
+    Column("admin_message", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: now_utc()),
+    Column("delivered_at", DateTime(timezone=True), nullable=True),
+    Column("cancelled_at", DateTime(timezone=True), nullable=True),
+    Column("payment_provider", String(40), nullable=True),
+    Column("payment_id", String(120), nullable=True),
+    Column("payment_status", String(60), nullable=True),
+    Column("payment_qr_code", Text, nullable=True),
+    Column("payment_qr_code_base64", Text, nullable=True),
+    Column("payment_ticket_url", Text, nullable=True),
+    Column("payment_created_at", DateTime(timezone=True), nullable=True),
+    Column("payment_paid_at", DateTime(timezone=True), nullable=True),
+)
+
+user_themes = Table(
+    "user_themes",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", Integer, ForeignKey("users.id"), nullable=False, index=True),
+    Column("theme_id", String(80), ForeignKey("themes.id"), nullable=False, index=True),
+    Column("source", String(60), nullable=False, default="purchase"),
+    Column("order_id", Integer, ForeignKey("theme_orders.id"), nullable=True),
+    Column("granted_by", Integer, ForeignKey("users.id"), nullable=True),
+    Column("note", Text, nullable=True),
+    Column("purchased_at", DateTime(timezone=True), nullable=False, default=lambda: now_utc()),
+)
+
+
+DEFAULT_THEME_CATALOG = [
+    {
+        "id": "windows_11_pro_glass",
+        "name": "Windows 11 Pro Glass",
+        "description": "Tema premium com vidro translúcido, sombras suaves e visual inspirado em Windows 11 Pro.",
+        "price_cents": 990,
+        "preview_url": "",
+        "accent_color": "#0078D4",
+        "category": "premium",
+        "is_active": True,
+    },
+    {
+        "id": "cinema_dark_luxury",
+        "name": "Cinema Dark Luxury",
+        "description": "Tema escuro cinematográfico com profundidade, aura premium e acabamento elegante.",
+        "price_cents": 1290,
+        "preview_url": "",
+        "accent_color": "#B99A5B",
+        "category": "cinema",
+        "is_active": True,
+    },
+    {
+        "id": "liquid_glass_pro",
+        "name": "Liquid Glass Pro",
+        "description": "Tema com efeito liquid glass, transparência controlada e aparência moderna.",
+        "price_cents": 1490,
+        "preview_url": "",
+        "accent_color": "#7DD3FC",
+        "category": "glass",
+        "is_active": True,
+    },
+]
 
 
 
@@ -822,6 +911,39 @@ class SupportUpdateRequest(BaseModel):
     admin_message: Optional[str] = None
 
 
+class ThemePurchaseRequest(BaseModel):
+    theme_id: str = Field(min_length=2, max_length=80)
+    buyer_name: Optional[str] = Field(default=None, max_length=120)
+    buyer_email: Optional[str] = Field(default=None, max_length=180)
+
+
+class ThemeCreateRequest(BaseModel):
+    id: str = Field(min_length=2, max_length=80)
+    name: str = Field(min_length=2, max_length=120)
+    description: Optional[str] = None
+    price_cents: int = Field(ge=0)
+    preview_url: Optional[str] = None
+    accent_color: Optional[str] = Field(default=None, max_length=40)
+    category: str = Field(default="premium", max_length=80)
+    is_active: bool = True
+
+
+class ThemeGiveRequest(BaseModel):
+    user_id: int
+    theme_id: str = Field(min_length=2, max_length=80)
+    message: Optional[str] = None
+
+
+class ThemeRemoveRequest(BaseModel):
+    user_id: int
+    theme_id: str = Field(min_length=2, max_length=80)
+
+
+class ThemeOrderActionRequest(BaseModel):
+    order_id: int
+    message: Optional[str] = None
+
+
 # ==================================================
 # BANCO / BOOTSTRAP
 # ==================================================
@@ -925,6 +1047,24 @@ def init_db() -> None:
                         plan="premium",
                         duration_minutes=30,
                         permanent=False,
+                        created_at=now_utc(),
+                    )
+                )
+
+        # Catálogo inicial da loja de temas. Não sobrescreve temas já existentes.
+        for theme in DEFAULT_THEME_CATALOG:
+            existing_theme = conn.execute(select(themes.c.id).where(themes.c.id == theme["id"])).first()
+            if existing_theme is None:
+                conn.execute(
+                    themes.insert().values(
+                        id=theme["id"],
+                        name=theme["name"],
+                        description=theme.get("description"),
+                        price_cents=int(theme.get("price_cents") or 0),
+                        preview_url=theme.get("preview_url"),
+                        accent_color=theme.get("accent_color"),
+                        category=theme.get("category") or "premium",
+                        is_active=bool(theme.get("is_active", True)),
                         created_at=now_utc(),
                     )
                 )
@@ -1897,6 +2037,398 @@ def sync_mp_payment_for_beta_order(order_id: int, order_token: Optional[str] = N
         return {"order": serialize_beta_access_order(updated), "payment_checked": True, "mercadopago_status": status, "payment_validated": valid_payment, "validation_message": validation_message, "delivered": delivered}
 
 
+# ==================================================
+# ROTAS DA LOJA DE TEMAS
+# ==================================================
+
+
+def normalize_theme_id(theme_id: str) -> str:
+    value = str(theme_id or "").strip().lower()
+    value = re.sub(r"[^a-z0-9_\-]+", "_", value).strip("_")
+    if not value or len(value) > 80:
+        raise HTTPException(status_code=400, detail="ID do tema inválido")
+    return value
+
+
+def serialize_theme(row: Any, owned: bool = False) -> Dict[str, Any]:
+    data = row_dict(row)
+    return {
+        "id": data.get("id"),
+        "name": data.get("name"),
+        "description": data.get("description"),
+        "price_cents": int(data.get("price_cents") or 0),
+        "price_label": price_label(int(data.get("price_cents") or 0)),
+        "preview_url": data.get("preview_url"),
+        "accent_color": data.get("accent_color"),
+        "category": data.get("category"),
+        "is_active": bool(data.get("is_active")),
+        "owned": bool(owned),
+        "created_at": serialize_dt(data.get("created_at")),
+        "updated_at": serialize_dt(data.get("updated_at")),
+    }
+
+
+def serialize_theme_order(row: Any) -> Dict[str, Any]:
+    data = row_dict(row)
+    return {
+        "id": data.get("id"),
+        "user_id": data.get("user_id"),
+        "theme_id": data.get("theme_id"),
+        "theme_name": data.get("theme_name"),
+        "price_cents": int(data.get("price_cents") or 0),
+        "price_label": price_label(int(data.get("price_cents") or 0)),
+        "status": data.get("status"),
+        "buyer_name": data.get("buyer_name"),
+        "buyer_email": data.get("buyer_email"),
+        "admin_message": data.get("admin_message"),
+        "created_at": serialize_dt(data.get("created_at")),
+        "delivered_at": serialize_dt(data.get("delivered_at")),
+        "cancelled_at": serialize_dt(data.get("cancelled_at")),
+        "payment_provider": data.get("payment_provider"),
+        "payment_id": data.get("payment_id"),
+        "payment_status": data.get("payment_status"),
+        "payment_qr_code": data.get("payment_qr_code"),
+        "payment_qr_code_base64": data.get("payment_qr_code_base64"),
+        "payment_ticket_url": data.get("payment_ticket_url"),
+        "payment_created_at": serialize_dt(data.get("payment_created_at")),
+        "payment_paid_at": serialize_dt(data.get("payment_paid_at")),
+    }
+
+
+def user_owns_theme(conn, user_id: int, theme_id: str) -> bool:
+    found = conn.execute(
+        select(user_themes.c.id).where(
+            user_themes.c.user_id == int(user_id),
+            user_themes.c.theme_id == str(theme_id),
+        )
+    ).first()
+    return found is not None
+
+
+def get_theme_or_404(conn, theme_id: str, active_only: bool = False) -> Dict[str, Any]:
+    theme_id = normalize_theme_id(theme_id)
+    query = select(themes).where(themes.c.id == theme_id)
+    if active_only:
+        query = query.where(themes.c.is_active == True)  # noqa: E712
+    found = conn.execute(query).first()
+    if not found:
+        raise HTTPException(status_code=404, detail="Tema não encontrado ou indisponível")
+    return row_dict(found)
+
+
+def grant_theme_to_user(conn, user_id: int, theme_id: str, source: str = "purchase", order_id: Optional[int] = None, granted_by: Optional[int] = None, note: Optional[str] = None) -> Dict[str, Any]:
+    theme_id = normalize_theme_id(theme_id)
+    user_found = conn.execute(select(users.c.id, users.c.username).where(users.c.id == int(user_id))).first()
+    if not user_found:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+    theme = get_theme_or_404(conn, theme_id, active_only=False)
+
+    existing = conn.execute(
+        select(user_themes).where(user_themes.c.user_id == int(user_id), user_themes.c.theme_id == theme_id)
+    ).first()
+    if existing:
+        return {"already_owned": True, "theme": serialize_theme(theme, owned=True)}
+
+    conn.execute(
+        user_themes.insert().values(
+            user_id=int(user_id),
+            theme_id=theme_id,
+            source=str(source or "purchase")[:60],
+            order_id=order_id,
+            granted_by=granted_by,
+            note=safe_details(note),
+            purchased_at=now_utc(),
+        )
+    )
+    add_app_log(conn, int(user_id), "theme_unlocked", f"theme={theme_id}; source={source}; order={order_id}")
+    return {"theme": serialize_theme(theme, owned=True)}
+
+
+def deliver_theme_order(conn, order: Dict[str, Any], message: str = "Pagamento aprovado. Tema entregue automaticamente.") -> Dict[str, Any]:
+    if order.get("status") == "delivered":
+        return {"already_delivered": True, "theme_id": order.get("theme_id")}
+
+    granted = grant_theme_to_user(
+        conn,
+        int(order["user_id"]),
+        str(order["theme_id"]),
+        source="purchase",
+        order_id=int(order["id"]),
+        note=message,
+    )
+    conn.execute(
+        update(theme_orders)
+        .where(theme_orders.c.id == int(order["id"]))
+        .values(
+            status="delivered",
+            admin_message=message,
+            delivered_at=now_utc(),
+            payment_paid_at=order.get("payment_paid_at") or now_utc(),
+        )
+    )
+    add_app_log(conn, int(order["user_id"]), "theme_order_delivered", f"theme={order['theme_id']}; pedido_tema={order['id']}; {message}")
+    return {"theme_id": order.get("theme_id"), "theme": granted.get("theme")}
+
+
+def sync_mp_payment_for_theme_order(order_id: int) -> Dict[str, Any]:
+    with engine.begin() as conn:
+        found = conn.execute(select(theme_orders).where(theme_orders.c.id == int(order_id))).first()
+        if not found:
+            raise HTTPException(status_code=404, detail="Pedido de tema não encontrado")
+        order = row_dict(found)
+        payment_id = order.get("payment_id")
+        if not payment_id:
+            return {"order": serialize_theme_order(order), "payment_checked": False, "message": "Pedido de tema sem pagamento Mercado Pago"}
+        payment = mp_request("GET", f"/v1/payments/{payment_id}")
+        status = payment.get("status") or order.get("payment_status") or "pending"
+        values = {"payment_status": status}
+        valid_payment, validation_message = mp_payment_matches_order(payment, order, f"theme:{order_id}")
+        if mp_payment_is_approved(status) and valid_payment:
+            values["payment_paid_at"] = now_utc()
+        conn.execute(update(theme_orders).where(theme_orders.c.id == int(order_id)).values(**values))
+        order.update(values)
+        delivered = None
+        if mp_payment_is_approved(status) and valid_payment and order.get("status") != "delivered":
+            delivered = deliver_theme_order(conn, order, "Pagamento PIX aprovado e validado pelo Mercado Pago. Tema entregue automaticamente.")
+        updated = conn.execute(select(theme_orders).where(theme_orders.c.id == int(order_id))).first()
+        return {"order": serialize_theme_order(updated), "payment_checked": True, "mercadopago_status": status, "payment_validated": valid_payment, "validation_message": validation_message, "delivered": delivered}
+
+
+@app.get("/themes/store")
+def list_theme_store():
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(themes).where(themes.c.is_active == True).order_by(themes.c.category.asc(), themes.c.name.asc())  # noqa: E712
+        ).fetchall()
+    return {"themes": [serialize_theme(row) for row in rows]}
+
+
+@app.get("/themes/my")
+def my_themes(user: Dict[str, Any] = Depends(get_user_by_token)):
+    with engine.connect() as conn:
+        owned_rows = conn.execute(select(user_themes.c.theme_id).where(user_themes.c.user_id == int(user["id"]))).fetchall()
+        owned_ids = {row[0] for row in owned_rows}
+        store_rows = conn.execute(
+            select(themes).where(themes.c.is_active == True).order_by(themes.c.category.asc(), themes.c.name.asc())  # noqa: E712
+        ).fetchall()
+    all_themes = [serialize_theme(row, owned=row_dict(row).get("id") in owned_ids) for row in store_rows]
+    return {
+        "themes": [theme for theme in all_themes if theme["owned"]],
+        "owned_theme_ids": sorted(owned_ids),
+        "store": all_themes,
+    }
+
+
+@app.post("/themes/purchase")
+def purchase_theme(data: ThemePurchaseRequest, user: Dict[str, Any] = Depends(get_user_by_token)):
+    theme_id = normalize_theme_id(data.theme_id)
+    with engine.begin() as conn:
+        theme = get_theme_or_404(conn, theme_id, active_only=True)
+        if user_owns_theme(conn, int(user["id"]), theme_id):
+            return {"message": "Tema já liberado na sua conta", "owned": True, "theme": serialize_theme(theme, owned=True)}
+
+        recent_orders = int(conn.execute(
+            select(func.count()).select_from(theme_orders).where(
+                theme_orders.c.user_id == int(user["id"]),
+                theme_orders.c.created_at >= now_utc() - timedelta(minutes=10),
+            )
+        ).scalar_one() or 0)
+        open_orders = int(conn.execute(
+            select(func.count()).select_from(theme_orders).where(
+                theme_orders.c.user_id == int(user["id"]),
+                theme_orders.c.status.in_(["pending", "payment_pending"]),
+            )
+        ).scalar_one() or 0)
+        if recent_orders >= 5 or open_orders >= 8:
+            add_security_event(conn, "theme_order_spam_blocked", False, user_id=user["id"], username=user.get("username"), details=f"recent={recent_orders}; open={open_orders}")
+            raise HTTPException(status_code=429, detail="Muitos pedidos de tema em pouco tempo. Aguarde ou finalize pedidos antigos.")
+
+        result = conn.execute(
+            theme_orders.insert().values(
+                user_id=int(user["id"]),
+                theme_id=theme_id,
+                theme_name=theme["name"],
+                price_cents=int(theme.get("price_cents") or 0),
+                status="pending",
+                buyer_name=str(data.buyer_name or user.get("username") or "Cliente")[:120],
+                buyer_email=str(data.buyer_email or "")[:180] or None,
+                payment_provider="mercadopago" if mercadopago_enabled() and int(theme.get("price_cents") or 0) > 0 else "manual",
+                payment_status="pending" if mercadopago_enabled() and int(theme.get("price_cents") or 0) > 0 else None,
+                created_at=now_utc(),
+            )
+        )
+        order_id = result.inserted_primary_key[0]
+        add_app_log(conn, user["id"], "theme_order_created", f"pedido_tema={order_id}; theme={theme_id}; price={price_label(theme.get('price_cents') or 0)}")
+
+        if int(theme.get("price_cents") or 0) <= 0:
+            order = row_dict(conn.execute(select(theme_orders).where(theme_orders.c.id == order_id)).first())
+            delivered = deliver_theme_order(conn, order, "Tema gratuito liberado automaticamente.")
+            updated = conn.execute(select(theme_orders).where(theme_orders.c.id == order_id)).first()
+            return {"message": "Tema gratuito liberado", "order_id": order_id, "status": "delivered", "order": serialize_theme_order(updated), "delivered": delivered}
+
+    payment_payload = {}
+    message = "Pedido de tema enviado para análise do admin"
+    status = "pending"
+    if mercadopago_enabled():
+        payer_email = str(data.buyer_email or "").strip()
+        if not payer_email:
+            payer_email = make_mp_payer_email(user)
+        else:
+            payer_email = valid_email_or_technical(payer_email, str(data.buyer_name or user.get("username") or "cliente"))
+        payment_payload = create_mp_pix_payment_public(
+            external_reference=f"theme:{order_id}",
+            amount_cents=int(theme["price_cents"]),
+            description=f"PC Ultra Manager - Tema {theme['name']}",
+            payer_email=payer_email,
+            payer_name=str(data.buyer_name or user.get("username") or "Cliente"),
+            idempotency_prefix=f"theme-{order_id}",
+        )
+        with engine.begin() as conn:
+            conn.execute(
+                update(theme_orders)
+                .where(theme_orders.c.id == int(order_id))
+                .values(
+                    status="payment_pending",
+                    payment_provider="mercadopago",
+                    payment_id=payment_payload.get("payment_id"),
+                    payment_status=payment_payload.get("payment_status"),
+                    payment_qr_code=payment_payload.get("payment_qr_code"),
+                    payment_qr_code_base64=payment_payload.get("payment_qr_code_base64"),
+                    payment_ticket_url=payment_payload.get("payment_ticket_url"),
+                    payment_created_at=now_utc(),
+                )
+            )
+        message = "Pedido de tema criado. Pague o PIX para liberar no app."
+        status = "payment_pending"
+
+    return {
+        "message": message,
+        "order_id": order_id,
+        "status": status,
+        "theme": serialize_theme(theme, owned=False),
+        **payment_payload,
+    }
+
+
+@app.get("/themes/orders/{order_id}/payment-status")
+def theme_order_payment_status(order_id: int, user: Dict[str, Any] = Depends(get_user_by_token)):
+    with engine.connect() as conn:
+        found = conn.execute(select(theme_orders).where(theme_orders.c.id == int(order_id))).first()
+        if not found:
+            raise HTTPException(status_code=404, detail="Pedido de tema não encontrado")
+        order = row_dict(found)
+        if int(order.get("user_id")) != int(user.get("id")) and not is_admin(user):
+            raise HTTPException(status_code=403, detail="Acesso negado")
+    if order.get("payment_provider") == "mercadopago" and order.get("payment_id") and order.get("status") != "delivered":
+        return sync_mp_payment_for_theme_order(order_id)
+    return {"order": serialize_theme_order(order), "payment_checked": False}
+
+
+@app.get("/admin/themes")
+def admin_list_themes(admin: Dict[str, Any] = Depends(require_admin)):
+    with engine.connect() as conn:
+        rows = conn.execute(select(themes).order_by(themes.c.category.asc(), themes.c.name.asc())).fetchall()
+    return {"themes": [serialize_theme(row) for row in rows]}
+
+
+@app.post("/admin/themes/create")
+def admin_create_theme(data: ThemeCreateRequest, admin: Dict[str, Any] = Depends(require_admin)):
+    theme_id = normalize_theme_id(data.id)
+    values = {
+        "id": theme_id,
+        "name": data.name.strip(),
+        "description": safe_details(data.description),
+        "price_cents": int(data.price_cents),
+        "preview_url": str(data.preview_url or "").strip() or None,
+        "accent_color": str(data.accent_color or "").strip() or None,
+        "category": str(data.category or "premium").strip()[:80] or "premium",
+        "is_active": bool(data.is_active),
+        "created_by": int(admin["id"]),
+        "updated_at": now_utc(),
+    }
+    with engine.begin() as conn:
+        existing = conn.execute(select(themes.c.id).where(themes.c.id == theme_id)).first()
+        if existing:
+            update_values = dict(values)
+            update_values.pop("id", None)
+            update_values.pop("created_by", None)
+            conn.execute(update(themes).where(themes.c.id == theme_id).values(**update_values))
+            action = "theme_updated"
+        else:
+            values["created_at"] = now_utc()
+            conn.execute(themes.insert().values(**values))
+            action = "theme_created"
+        add_admin_log(conn, admin["id"], action, theme_id, f"price={price_label(data.price_cents)}; active={data.is_active}")
+        found = conn.execute(select(themes).where(themes.c.id == theme_id)).first()
+    return {"message": "Tema salvo", "theme": serialize_theme(found)}
+
+
+@app.post("/admin/themes/give")
+def admin_give_theme(data: ThemeGiveRequest, admin: Dict[str, Any] = Depends(require_admin)):
+    theme_id = normalize_theme_id(data.theme_id)
+    with engine.begin() as conn:
+        granted = grant_theme_to_user(conn, int(data.user_id), theme_id, source="admin", granted_by=int(admin["id"]), note=data.message or "Tema liberado pelo admin")
+        add_admin_log(conn, admin["id"], "theme_given", f"user={data.user_id}; theme={theme_id}", data.message or "Tema liberado pelo admin")
+    return {"message": "Tema liberado para o usuário", **granted}
+
+
+@app.post("/admin/themes/remove")
+@app.delete("/admin/themes/remove")
+def admin_remove_theme(data: ThemeRemoveRequest, admin: Dict[str, Any] = Depends(require_admin)):
+    theme_id = normalize_theme_id(data.theme_id)
+    with engine.begin() as conn:
+        result = conn.execute(user_themes.delete().where(user_themes.c.user_id == int(data.user_id), user_themes.c.theme_id == theme_id))
+        add_admin_log(conn, admin["id"], "theme_removed", f"user={data.user_id}; theme={theme_id}", f"removed={result.rowcount}")
+        add_app_log(conn, int(data.user_id), "theme_removed_by_admin", f"theme={theme_id}")
+    return {"message": "Tema removido do usuário", "removed": int(result.rowcount or 0)}
+
+
+@app.get("/admin/theme-orders")
+def admin_theme_orders(status: str = Query("todos"), admin: Dict[str, Any] = Depends(require_admin)):
+    with engine.connect() as conn:
+        query = select(theme_orders).order_by(theme_orders.c.id.desc()).limit(300)
+        if status and status != "todos":
+            query = query.where(theme_orders.c.status == status)
+        rows = conn.execute(query).fetchall()
+    return {"orders": [serialize_theme_order(row) for row in rows]}
+
+
+@app.post("/admin/theme-orders/approve")
+def admin_approve_theme_order(data: ThemeOrderActionRequest, admin: Dict[str, Any] = Depends(require_admin)):
+    message = data.message or "Pedido de tema aprovado manualmente pelo admin."
+    with engine.begin() as conn:
+        found = conn.execute(select(theme_orders).where(theme_orders.c.id == int(data.order_id))).first()
+        if not found:
+            raise HTTPException(status_code=404, detail="Pedido de tema não encontrado")
+        order = row_dict(found)
+        if order.get("status") == "cancelled":
+            raise HTTPException(status_code=400, detail="Pedido cancelado não pode ser aprovado")
+        delivered = deliver_theme_order(conn, order, message)
+        add_admin_log(conn, admin["id"], "theme_order_approved", str(data.order_id), message)
+        updated = conn.execute(select(theme_orders).where(theme_orders.c.id == int(data.order_id))).first()
+    return {"message": "Pedido de tema aprovado", "order": serialize_theme_order(updated), "delivered": delivered}
+
+
+@app.post("/admin/theme-orders/cancel")
+def admin_cancel_theme_order(data: ThemeOrderActionRequest, admin: Dict[str, Any] = Depends(require_admin)):
+    message = data.message or "Pedido de tema cancelado pelo admin."
+    with engine.begin() as conn:
+        found = conn.execute(select(theme_orders).where(theme_orders.c.id == int(data.order_id))).first()
+        if not found:
+            raise HTTPException(status_code=404, detail="Pedido de tema não encontrado")
+        order = row_dict(found)
+        if order.get("status") == "delivered":
+            raise HTTPException(status_code=400, detail="Pedido já entregue não pode ser cancelado")
+        conn.execute(
+            update(theme_orders)
+            .where(theme_orders.c.id == int(data.order_id))
+            .values(status="cancelled", cancelled_at=now_utc(), admin_message=message)
+        )
+        add_admin_log(conn, admin["id"], "theme_order_cancelled", str(data.order_id), message)
+        updated = conn.execute(select(theme_orders).where(theme_orders.c.id == int(data.order_id))).first()
+    return {"message": "Pedido de tema cancelado", "order": serialize_theme_order(updated)}
+
+
 @app.post("/orders/create")
 def create_order(data: CreateOrderRequest, user: Dict[str, Any] = Depends(get_user_by_token)):
     plan = normalize_plan(data.plan)
@@ -2033,6 +2565,29 @@ async def mercadopago_webhook(request: Request):
         return {"ok": True, "ignored": True, "reason": "sem external_reference", "payment_status": status}
 
     external_reference = str(external_reference)
+    if external_reference.startswith("theme:"):
+        try:
+            theme_order_id = int(external_reference.split(":", 1)[1])
+        except Exception:
+            return {"ok": True, "ignored": True, "reason": "external_reference theme inválida", "payment_status": status}
+        with engine.begin() as conn:
+            found = conn.execute(select(theme_orders).where(theme_orders.c.id == theme_order_id)).first()
+            if not found:
+                return {"ok": True, "ignored": True, "reason": "pedido de tema não encontrado", "payment_status": status}
+            order = row_dict(found)
+            valid_payment, validation_message = mp_payment_matches_order(payment, order, f"theme:{theme_order_id}")
+            values = {"payment_status": status}
+            if mp_payment_is_approved(status) and valid_payment:
+                values["payment_paid_at"] = now_utc()
+            conn.execute(update(theme_orders).where(theme_orders.c.id == theme_order_id).values(**values))
+            delivered = None
+            if mp_payment_is_approved(status) and valid_payment and order.get("status") != "delivered":
+                order["payment_status"] = status
+                order["payment_paid_at"] = now_utc()
+                delivered = deliver_theme_order(conn, order, "Pagamento PIX aprovado e validado pelo Mercado Pago. Tema entregue automaticamente.")
+            add_app_log(conn, order.get("user_id"), "mercadopago_theme_webhook", f"payment={payment_id}; status={status}; event={event_type}; theme_order={theme_order_id}; valid={valid_payment}; {validation_message}")
+        return {"ok": True, "theme_order_id": theme_order_id, "payment_status": status, "payment_validated": valid_payment, "validation_message": validation_message, "delivered": delivered}
+
     if external_reference.startswith("beta:"):
         try:
             beta_order_id = int(external_reference.split(":", 1)[1])
@@ -2446,6 +3001,8 @@ def delete_user(data: UserIdRequest, admin: Dict[str, Any] = Depends(require_adm
             raise HTTPException(status_code=400, detail="Não é permitido excluir outra conta admin por esta rota")
         conn.execute(sessions.delete().where(sessions.c.user_id == data.user_id))
         conn.execute(update(license_keys).where(license_keys.c.used_by == data.user_id).values(used_by=None, is_used=False, used_at=None))
+        conn.execute(user_themes.delete().where(user_themes.c.user_id == data.user_id))
+        conn.execute(theme_orders.delete().where(theme_orders.c.user_id == data.user_id))
         conn.execute(app_logs.delete().where(app_logs.c.user_id == data.user_id))
         conn.execute(users.delete().where(users.c.id == data.user_id))
         add_admin_log(conn, admin["id"], "user_deleted", str(data.user_id), f"username={target.get('username')}")
@@ -2488,6 +3045,12 @@ def admin_dashboard(admin: Dict[str, Any] = Depends(require_admin)):
         orders_pending = int(conn.execute(select(func.count()).select_from(orders).where(orders.c.status.in_(["pending", "payment_pending"]))).scalar_one() or 0)
         orders_delivered = int(conn.execute(select(func.count()).select_from(orders).where(orders.c.status == "delivered")).scalar_one() or 0)
         revenue_cents = int(conn.execute(select(func.coalesce(func.sum(orders.c.price_cents), 0)).where(orders.c.status == "delivered")).scalar_one() or 0)
+        themes_total = int(conn.execute(select(func.count()).select_from(themes)).scalar_one() or 0)
+        themes_active = int(conn.execute(select(func.count()).select_from(themes).where(themes.c.is_active == True)).scalar_one() or 0)  # noqa: E712
+        theme_orders_total = int(conn.execute(select(func.count()).select_from(theme_orders)).scalar_one() or 0)
+        theme_orders_pending = int(conn.execute(select(func.count()).select_from(theme_orders).where(theme_orders.c.status.in_(["pending", "payment_pending"]))).scalar_one() or 0)
+        theme_orders_delivered = int(conn.execute(select(func.count()).select_from(theme_orders).where(theme_orders.c.status == "delivered")).scalar_one() or 0)
+        themes_revenue_cents = int(conn.execute(select(func.coalesce(func.sum(theme_orders.c.price_cents), 0)).where(theme_orders.c.status == "delivered")).scalar_one() or 0)
         tickets_open = int(conn.execute(select(func.count()).select_from(support_tickets).where(support_tickets.c.status.in_(["aberto", "em_analise"]))).scalar_one() or 0)
         security_recent = int(conn.execute(select(func.count()).select_from(security_events).where(security_events.c.created_at >= now_utc() - timedelta(hours=24))).scalar_one() or 0)
         latest_tickets = conn.execute(
@@ -2501,6 +3064,15 @@ def admin_dashboard(admin: Dict[str, Any] = Depends(require_admin)):
         "keys": {"total": key_total, "used": key_used, "available": max(0, key_total - key_used - key_revoked), "revoked": key_revoked},
         "beta": {"total": beta_total, "access_orders": beta_access_orders_total, "access_delivered": beta_access_orders_delivered},
         "orders": {"total": orders_total, "pending": orders_pending, "delivered": orders_delivered, "revenue_cents": revenue_cents, "revenue_label": price_label(revenue_cents)},
+        "themes": {
+            "total": themes_total,
+            "active": themes_active,
+            "orders_total": theme_orders_total,
+            "orders_pending": theme_orders_pending,
+            "orders_delivered": theme_orders_delivered,
+            "revenue_cents": themes_revenue_cents,
+            "revenue_label": price_label(themes_revenue_cents),
+        },
         "support": {"open": tickets_open, "latest": [serialize_ticket(row, username=row_dict(row).get("username")) for row in latest_tickets]},
         "security": {"events_24h": security_recent},
         "server": {"version": APP_VERSION, "payment_provider": PAYMENT_PROVIDER, "mercadopago_configured": bool(MERCADOPAGO_ACCESS_TOKEN), "time": serialize_dt(now_utc())},
