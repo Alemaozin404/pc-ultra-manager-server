@@ -39,7 +39,7 @@ from sqlalchemy.exc import IntegrityError
 # CONFIGURAÇÃO PRINCIPAL
 # ==================================================
 
-APP_VERSION = "4.2.0-themes-store"
+APP_VERSION = "4.2.1-theme-event-matrix"
 DEFAULT_DATABASE_URL = "sqlite:///./database.db"
 SAFE_DEV_ADMIN_PASSWORD = "admin123456"
 SAFE_DEV_JWT_SECRET = "dev-only-change-this-secret-local-000000000000"
@@ -421,6 +421,26 @@ DEFAULT_THEME_CATALOG = [
         "preview_url": "",
         "accent_color": "#7DD3FC",
         "category": "glass",
+        "is_active": True,
+    },
+    {
+        "id": "diamond_black_event",
+        "name": "Diamond Black",
+        "description": "Tema especial de evento semanal com fundo preto cristal, brilho de diamante, letras em branco gelo e contornos premium de alto contraste. Preço promocional por tempo limitado.",
+        "price_cents": 250,
+        "preview_url": "",
+        "accent_color": "#F8FAFC",
+        "category": "evento semanal",
+        "is_active": True,
+    },
+    {
+        "id": "matrix_effect_subscription",
+        "name": "Matrix Effect",
+        "description": "Tema estilo Matrix com chuva de códigos, brilho verde digital, atmosfera hacker/cyber e efeito visual de terminal futurista. Marcado como assinatura/teste por R$ 0,50.",
+        "price_cents": 50,
+        "preview_url": "",
+        "accent_color": "#00FF66",
+        "category": "assinatura",
         "is_active": True,
     },
 ]
