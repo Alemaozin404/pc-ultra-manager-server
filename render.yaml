@@ -13,3 +13,21 @@ services:
         value: 30
       - key: CORS_ORIGINS
         value: "*"
+      - key: ADMIN_USERNAME
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: PAYMENT_PROVIDER
+        value: mercadopago
+      - key: MERCADOPAGO_ACCESS_TOKEN
+        sync: false
+      - key: MERCADOPAGO_WEBHOOK_SECRET
+        sync: false
+      - key: MERCADOPAGO_WEBHOOK_TOLERANCE_SECONDS
+        value: 600
+      - key: PUBLIC_BASE_URL
+        value: https://pc-ultra-manager-server.onrender.com
+      - key: MERCADOPAGO_PAYER_EMAIL_DOMAIN
+        value: pcultramanager.com.br
