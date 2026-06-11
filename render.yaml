@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: pc-ultra-manager-server
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: JWT_SECRET
+        generateValue: true
+      - key: SESSION_DAYS
+        value: 30
+      - key: CORS_ORIGINS
+        value: "*"
