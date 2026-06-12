@@ -182,3 +182,33 @@ uvicorn main:app --reload
 - `POST /admin/orders/cancel`
 - `POST /logs/create`
 - `GET /admin/logs`
+
+## E-mail de comprovante dos temas
+
+Depois que um pagamento de tema é aprovado, o servidor pode enviar automaticamente um e-mail para o comprador com:
+
+- comprovante para emergências;
+- número do pedido;
+- ID do pagamento Mercado Pago;
+- tema comprado/assinado;
+- valor pago;
+- tutorial de ativação no app;
+- data da ativação;
+- validade da assinatura, quando o tema for assinatura, como Matrix Effect.
+
+Para ativar no Render, configure:
+
+```env
+EMAIL_ENABLED=true
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=465
+SMTP_USERNAME=seuemail@gmail.com
+SMTP_PASSWORD=sua_senha_de_app_ou_smtp
+SMTP_FROM_EMAIL=seuemail@gmail.com
+SMTP_FROM_NAME=PC Ultra Manager
+SMTP_SUPPORT_EMAIL=seuemail@gmail.com
+SMTP_USE_SSL=auto
+SMTP_USE_STARTTLS=auto
+```
+
+Se `EMAIL_ENABLED=false` ou SMTP não estiver configurado, a compra continua funcionando normalmente, mas o servidor registra que o comprovante por e-mail não foi enviado.

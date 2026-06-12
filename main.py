@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import hmac
 import os
 import re
 import secrets
 import json
+import smtplib
+import ssl
 import urllib.request
 import urllib.error
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from email.message import EmailMessage
+from email.utils import formataddr
 from typing import Any, Dict, Optional, Tuple
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -112,6 +117,24 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 if not PUBLIC_BASE_URL and not IS_PRODUCTION:
     PUBLIC_BASE_URL = "http://localhost:8000"
 
+# E-mail transacional: usado para comprovante, tutorial e validade após pagamento aprovado.
+# Não bloqueia o servidor se não estiver configurado. Em produção, configure SMTP_* no Render.
+EMAIL_ENABLED = os.getenv("EMAIL_ENABLED", "false").strip().lower() in {"1", "true", "yes", "sim"}
+SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+try:
+    SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
+except ValueError:
+    raise RuntimeError("[CONFIG] SMTP_PORT precisa ser um número inteiro.")
+SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
+SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", SMTP_USERNAME).strip()
+SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "PC Ultra Manager").strip() or "PC Ultra Manager"
+SMTP_SUPPORT_EMAIL = os.getenv("SMTP_SUPPORT_EMAIL", SMTP_FROM_EMAIL).strip()
+SMTP_USE_SSL_VALUE = os.getenv("SMTP_USE_SSL", "auto").strip().lower()
+SMTP_USE_STARTTLS_VALUE = os.getenv("SMTP_USE_STARTTLS", "auto").strip().lower()
+SMTP_USE_SSL = (SMTP_PORT == 465) if SMTP_USE_SSL_VALUE in {"", "auto"} else SMTP_USE_SSL_VALUE in {"1", "true", "yes", "sim"}
+SMTP_USE_STARTTLS = (not SMTP_USE_SSL) if SMTP_USE_STARTTLS_VALUE in {"", "auto"} else SMTP_USE_STARTTLS_VALUE in {"1", "true", "yes", "sim"}
+
 APP_LATEST_VERSION = os.getenv("APP_LATEST_VERSION", "4.1.1-security-env").strip()
 APP_CHANNEL = os.getenv("APP_CHANNEL", "Acesso Antecipado Beta RC3").strip()
 APP_DOWNLOAD_URL = os.getenv("APP_DOWNLOAD_URL", "").strip()
@@ -124,6 +147,10 @@ require_config(bool(ADMIN_USERNAME), "ADMIN_USERNAME é obrigatório.")
 require_config(bool(ADMIN_PASSWORD), "ADMIN_PASSWORD é obrigatório.")
 require_config(bool(JWT_SECRET), "JWT_SECRET é obrigatório.")
 require_config(payer_domain_is_valid(MERCADOPAGO_PAYER_EMAIL_DOMAIN), "MERCADOPAGO_PAYER_EMAIL_DOMAIN precisa ser um domínio público válido, exemplo: pcultramanager.com.br.")
+if EMAIL_ENABLED:
+    require_config(bool(SMTP_HOST), "SMTP_HOST é obrigatório quando EMAIL_ENABLED=true.")
+    require_config(SMTP_PORT > 0, "SMTP_PORT precisa ser válido quando EMAIL_ENABLED=true.")
+    require_config(bool(SMTP_FROM_EMAIL) and re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", SMTP_FROM_EMAIL), "SMTP_FROM_EMAIL precisa ser um e-mail válido quando EMAIL_ENABLED=true.")
 
 if IS_PRODUCTION:
     require_config(not DATABASE_URL.startswith("sqlite"), "DATABASE_URL não pode ser SQLite em produção. Use PostgreSQL.")
@@ -373,6 +400,8 @@ theme_orders = Table(
     Column("status", String(30), nullable=False, default="pending"),
     Column("buyer_name", String(120), nullable=True),
     Column("buyer_email", String(180), nullable=True),
+    Column("receipt_email_sent_at", DateTime(timezone=True), nullable=True),
+    Column("receipt_email_error", Text, nullable=True),
     Column("admin_message", Text, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, default=lambda: now_utc()),
     Column("delivered_at", DateTime(timezone=True), nullable=True),
@@ -1018,6 +1047,8 @@ def ensure_schema_updates() -> None:
             "ALTER TABLE theme_orders ADD COLUMN IF NOT EXISTS access_type VARCHAR(30) DEFAULT 'one_time'",
             "ALTER TABLE theme_orders ADD COLUMN IF NOT EXISTS duration_days INTEGER",
             "ALTER TABLE theme_orders ADD COLUMN IF NOT EXISTS access_expires_at TIMESTAMP WITH TIME ZONE",
+            "ALTER TABLE theme_orders ADD COLUMN IF NOT EXISTS receipt_email_sent_at TIMESTAMP WITH TIME ZONE",
+            "ALTER TABLE theme_orders ADD COLUMN IF NOT EXISTS receipt_email_error TEXT",
             "ALTER TABLE user_themes ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP WITH TIME ZONE",
             "ALTER TABLE user_themes ADD COLUMN IF NOT EXISTS status VARCHAR(30) DEFAULT 'active'",
             "UPDATE themes SET access_type = 'one_time' WHERE access_type IS NULL",
@@ -1071,6 +1102,8 @@ def ensure_schema_updates() -> None:
                 "access_type": "VARCHAR(30) DEFAULT 'one_time'",
                 "duration_days": "INTEGER",
                 "access_expires_at": "DATETIME",
+                "receipt_email_sent_at": "DATETIME",
+                "receipt_email_error": "TEXT",
             })
             add_missing("user_themes", {
                 "expires_at": "DATETIME",
@@ -1970,6 +2003,181 @@ def valid_email_or_technical(email: Optional[str], fallback_name: str = "beta") 
     return f"{local[:36]}.{secrets.token_hex(3)}@{domain}"
 
 
+def is_valid_public_email(email: Optional[str]) -> bool:
+    return bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", str(email or "").strip().lower()))
+
+
+def transactional_email_configured() -> bool:
+    return bool(EMAIL_ENABLED and SMTP_HOST and SMTP_FROM_EMAIL)
+
+
+def format_money_br(cents: Any) -> str:
+    try:
+        return price_label(int(cents or 0))
+    except Exception:
+        return "R$ 0,00"
+
+
+def format_dt_br(value: Any) -> str:
+    dt = normalize_dt(value)
+    if not dt:
+        return "Não informado"
+    br_tz = timezone(timedelta(hours=-3), "BRT")
+    return dt.astimezone(br_tz).strftime("%d/%m/%Y às %H:%M") + " (horário de Brasília)"
+
+
+def send_transactional_email(to_email: str, subject: str, text_body: str, html_body: Optional[str] = None) -> Tuple[bool, str]:
+    if not transactional_email_configured():
+        return False, "SMTP não configurado. Defina EMAIL_ENABLED=true e SMTP_* no Render."
+    if not is_valid_public_email(to_email):
+        return False, "E-mail do comprador inválido."
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = formataddr((SMTP_FROM_NAME, SMTP_FROM_EMAIL))
+    msg["To"] = to_email
+    if SMTP_SUPPORT_EMAIL and is_valid_public_email(SMTP_SUPPORT_EMAIL):
+        msg["Reply-To"] = SMTP_SUPPORT_EMAIL
+    msg.set_content(text_body)
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
+
+    try:
+        if SMTP_USE_SSL:
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=context, timeout=30) as smtp:
+                if SMTP_USERNAME:
+                    smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+                smtp.send_message(msg)
+        else:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as smtp:
+                if SMTP_USE_STARTTLS:
+                    smtp.starttls(context=ssl.create_default_context())
+                if SMTP_USERNAME:
+                    smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+                smtp.send_message(msg)
+        return True, "E-mail enviado com sucesso."
+    except Exception as exc:
+        return False, f"Falha ao enviar e-mail: {str(exc)[:500]}"
+
+
+def build_theme_receipt_email(order: Dict[str, Any], username: str) -> Tuple[str, str, str]:
+    theme_name = str(order.get("theme_name") or order.get("theme_id") or "Tema")
+    buyer_name = str(order.get("buyer_name") or username or "cliente").strip() or "cliente"
+    order_id = order.get("id")
+    payment_id = order.get("payment_id") or "Não informado"
+    access_type = str(order.get("access_type") or "one_time").casefold()
+    is_subscription = access_type == "subscription"
+    started_at = order.get("delivered_at") or order.get("payment_paid_at") or now_utc()
+    expires_at = order.get("access_expires_at")
+    validity = format_dt_br(expires_at) if is_subscription else "Vitalício"
+    title_type = "Assinatura ativada" if is_subscription else "Tema liberado"
+    subject = f"{title_type}: {theme_name} — PC Ultra Manager"
+    h_theme_name = html.escape(theme_name)
+    h_buyer_name = html.escape(buyer_name)
+    h_username = html.escape(str(username or ""))
+    h_payment_id = html.escape(str(payment_id or ""))
+    h_validity = html.escape(str(validity or ""))
+    h_started_at = html.escape(format_dt_br(started_at))
+    h_value = html.escape(format_money_br(order.get('price_cents')))
+    h_type = html.escape('Assinatura mensal' if is_subscription else 'Compra vitalícia')
+
+    text_body = f"""Olá, {buyer_name}!
+
+Seu pagamento foi aprovado e o tema foi liberado na sua conta do PC Ultra Manager.
+
+COMPROVANTE PARA EMERGÊNCIAS
+Pedido: #{order_id}
+Tema: {theme_name}
+Conta do app/site: {username}
+Valor: {format_money_br(order.get('price_cents'))}
+Tipo: {'Assinatura mensal' if is_subscription else 'Compra vitalícia'}
+Status: aprovado e entregue
+ID do pagamento: {payment_id}
+Data da ativação: {format_dt_br(started_at)}
+Validade: {validity}
+
+COMO ATIVAR O TEMA NO APP
+1. Abra o PC Ultra Manager.
+2. Faça login com a mesma conta usada na compra: {username}.
+3. Entre em Galeria de Temas.
+4. Clique em Sincronizar compras.
+5. Selecione o tema {theme_name} e clique em Ativar/Aplicar.
+
+IMPORTANTE
+Guarde este e-mail. Ele serve como comprovante em caso de emergência, suporte, troca de dispositivo ou dúvida sobre validade da assinatura.
+
+Obrigado por apoiar o PC Ultra Manager. Sua compra ajuda a manter o projeto vivo, mais bonito e mais forte.
+
+PC Ultra Manager
+"""
+
+    html_body = f"""
+<!doctype html>
+<html lang="pt-BR">
+<body style="margin:0;background:#05070d;color:#f8fafc;font-family:Arial,Helvetica,sans-serif;">
+  <div style="max-width:720px;margin:0 auto;padding:28px;">
+    <div style="border:1px solid rgba(248,250,252,.20);border-radius:24px;padding:28px;background:linear-gradient(135deg,rgba(15,23,42,.96),rgba(2,6,23,.96));box-shadow:0 24px 60px rgba(0,0,0,.45);">
+      <p style="margin:0 0 8px;color:#93c5fd;font-size:13px;letter-spacing:.12em;text-transform:uppercase;">PC Ultra Manager</p>
+      <h1 style="margin:0 0 10px;font-size:28px;">{html.escape(title_type)}: {h_theme_name}</h1>
+      <p style="margin:0 0 22px;color:#cbd5e1;line-height:1.6;">Olá, {h_buyer_name}. Seu pagamento foi aprovado e o tema foi liberado na sua conta.</p>
+
+      <div style="border:1px solid rgba(255,255,255,.14);border-radius:18px;padding:18px;margin:18px 0;background:rgba(255,255,255,.05);">
+        <h2 style="margin:0 0 12px;font-size:18px;">Comprovante para emergências</h2>
+        <p><b>Pedido:</b> #{order_id}</p>
+        <p><b>Tema:</b> {h_theme_name}</p>
+        <p><b>Conta:</b> {h_username}</p>
+        <p><b>Valor:</b> {h_value}</p>
+        <p><b>Tipo:</b> {h_type}</p>
+        <p><b>ID do pagamento:</b> {h_payment_id}</p>
+        <p><b>Data da ativação:</b> {h_started_at}</p>
+        <p><b>Validade:</b> {h_validity}</p>
+      </div>
+
+      <div style="border:1px solid rgba(125,211,252,.22);border-radius:18px;padding:18px;margin:18px 0;background:rgba(14,165,233,.08);">
+        <h2 style="margin:0 0 12px;font-size:18px;">Como ativar no app</h2>
+        <ol style="line-height:1.8;color:#e2e8f0;">
+          <li>Abra o PC Ultra Manager.</li>
+          <li>Faça login com a mesma conta usada na compra: <b>{h_username}</b>.</li>
+          <li>Entre em <b>Galeria de Temas</b>.</li>
+          <li>Clique em <b>Sincronizar compras</b>.</li>
+          <li>Selecione <b>{h_theme_name}</b> e clique em ativar/aplicar.</li>
+        </ol>
+      </div>
+
+      <p style="color:#cbd5e1;line-height:1.6;">Guarde este e-mail. Ele serve como comprovante em caso de emergência, suporte, troca de dispositivo ou dúvida sobre validade da assinatura.</p>
+      <p style="margin-top:22px;color:#f8fafc;"><b>Obrigado por apoiar o PC Ultra Manager.</b><br>Sua compra ajuda a manter o projeto vivo, mais bonito e mais forte.</p>
+    </div>
+  </div>
+</body>
+</html>
+"""
+    return subject, text_body, html_body
+
+
+def send_theme_receipt_email(conn, order: Dict[str, Any]) -> Dict[str, Any]:
+    buyer_email = str(order.get("buyer_email") or "").strip().lower()
+    if not buyer_email:
+        return {"sent": False, "reason": "Pedido sem e-mail do comprador."}
+    if not is_valid_public_email(buyer_email):
+        conn.execute(update(theme_orders).where(theme_orders.c.id == int(order["id"])).values(receipt_email_error="E-mail inválido para envio de comprovante."))
+        return {"sent": False, "reason": "E-mail inválido."}
+    if order.get("receipt_email_sent_at"):
+        return {"sent": False, "already_sent": True, "sent_at": serialize_dt(order.get("receipt_email_sent_at"))}
+
+    user_row = conn.execute(select(users.c.username).where(users.c.id == int(order["user_id"]))).first()
+    username = row_dict(user_row).get("username") if user_row else str(order.get("user_id"))
+    subject, text_body, html_body = build_theme_receipt_email(order, str(username or "usuário"))
+    sent, message = send_transactional_email(buyer_email, subject, text_body, html_body)
+    if sent:
+        conn.execute(update(theme_orders).where(theme_orders.c.id == int(order["id"])).values(receipt_email_sent_at=now_utc(), receipt_email_error=None))
+        add_app_log(conn, int(order["user_id"]), "theme_receipt_email_sent", f"pedido_tema={order['id']}; theme={order.get('theme_id')}; email={buyer_email}")
+        return {"sent": True, "email": buyer_email}
+    conn.execute(update(theme_orders).where(theme_orders.c.id == int(order["id"])).values(receipt_email_error=message[:1000]))
+    add_app_log(conn, int(order["user_id"]), "theme_receipt_email_failed", f"pedido_tema={order['id']}; theme={order.get('theme_id')}; email={buyer_email}; {message}")
+    return {"sent": False, "email": buyer_email, "reason": message}
+
+
 def create_mp_pix_payment_public(external_reference: str, amount_cents: int, description: str, payer_email: str, payer_name: str, idempotency_prefix: str) -> Dict[str, Any]:
     amount = round(int(amount_cents) / 100, 2)
     payload = {
@@ -2258,6 +2466,8 @@ def serialize_theme_order(row: Any) -> Dict[str, Any]:
         "status": data.get("status"),
         "buyer_name": data.get("buyer_name"),
         "buyer_email": data.get("buyer_email"),
+        "receipt_email_sent_at": serialize_dt(data.get("receipt_email_sent_at")),
+        "receipt_email_error": data.get("receipt_email_error"),
         "admin_message": data.get("admin_message"),
         "created_at": serialize_dt(data.get("created_at")),
         "delivered_at": serialize_dt(data.get("delivered_at")),
@@ -2363,23 +2573,34 @@ def deliver_theme_order(conn, order: Dict[str, Any], message: str = "Pagamento a
     )
     expires_at = granted.get("expires_at")
     expires_dt = normalize_dt(expires_at)
+    delivered_at = now_utc()
+    paid_at = order.get("payment_paid_at") or delivered_at
     conn.execute(
         update(theme_orders)
         .where(theme_orders.c.id == int(order["id"]))
         .values(
             status="delivered",
             admin_message=message,
-            delivered_at=now_utc(),
+            delivered_at=delivered_at,
             access_expires_at=expires_dt,
-            payment_paid_at=order.get("payment_paid_at") or now_utc(),
+            payment_paid_at=paid_at,
         )
     )
+    email_order = dict(order)
+    email_order.update({
+        "status": "delivered",
+        "admin_message": message,
+        "delivered_at": delivered_at,
+        "access_expires_at": expires_dt,
+        "payment_paid_at": paid_at,
+    })
+    receipt_email = send_theme_receipt_email(conn, email_order)
     if granted.get("access_type") == "subscription":
         log_msg = f"assinatura_30d theme={order['theme_id']}; pedido_tema={order['id']}; expira={expires_at}; {message}"
     else:
         log_msg = f"theme={order['theme_id']}; pedido_tema={order['id']}; {message}"
     add_app_log(conn, int(order["user_id"]), "theme_order_delivered", log_msg)
-    return {"theme_id": order.get("theme_id"), "theme": granted.get("theme"), "access_expires_at": expires_at, "access_type": granted.get("access_type")}
+    return {"theme_id": order.get("theme_id"), "theme": granted.get("theme"), "access_expires_at": expires_at, "access_type": granted.get("access_type"), "receipt_email": receipt_email}
 
 
 def sync_mp_payment_for_theme_order(order_id: int) -> Dict[str, Any]:
