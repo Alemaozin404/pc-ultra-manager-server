@@ -17,7 +17,7 @@ from email.message import EmailMessage
 from email.utils import formataddr
 from typing import Any, Dict, Optional, Tuple
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
