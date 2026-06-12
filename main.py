@@ -44,7 +44,7 @@ from sqlalchemy.exc import IntegrityError
 # CONFIGURAÇÃO PRINCIPAL
 # ==================================================
 
-APP_VERSION = "4.2.4-weekly-event-auto-rotation"
+APP_VERSION = "4.2.5-weekly-event-exclusive-tab"
 DEFAULT_DATABASE_URL = "sqlite:///./database.db"
 SAFE_DEV_ADMIN_PASSWORD = "admin123456"
 SAFE_DEV_JWT_SECRET = "dev-only-change-this-secret-local-000000000000"
@@ -2622,18 +2622,11 @@ def theme_is_listed_for_sale(theme: Dict[str, Any]) -> bool:
     data = row_dict(theme)
     if not bool(data.get("is_active")):
         return False
-    # Temas do evento semanal automático NÃO aparecem na loja normal.
-    # Eles aparecem apenas no endpoint /themes/weekly-event e na aba exclusiva do site.
-    if theme_is_auto_weekly_event(data):
-        return False
+    # Regra oficial: temas de Evento Semanal NÃO aparecem na loja normal.
+    # A loja normal mostra apenas temas permanentes/assinatura normais.
+    # O tema ativo da semana aparece exclusivamente em /themes/weekly-event.
     if theme_is_weekly_event_display(data):
-        starts_at = normalize_dt(data.get("event_starts_at"))
-        ends_at = normalize_dt(data.get("event_ends_at"))
-        now = now_utc()
-        if starts_at and now < starts_at:
-            return False
-        if ends_at and now >= ends_at:
-            return False
+        return False
     return True
 
 
@@ -2641,8 +2634,12 @@ def theme_is_buyable(theme: Dict[str, Any]) -> bool:
     data = row_dict(theme)
     if not bool(data.get("is_active")):
         return False
+    # Somente o tema ativo da rotação pode ser comprado pela aba Evento Semanal.
     if theme_is_auto_weekly_event(data):
         return is_current_weekly_event_theme(data)
+    # Outros temas marcados como evento semanal ficam fora da compra direta e da loja comum.
+    if theme_is_weekly_event_display(data):
+        return False
     return theme_is_listed_for_sale(data)
 
 
