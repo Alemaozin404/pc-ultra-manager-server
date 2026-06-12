@@ -212,3 +212,19 @@ SMTP_USE_STARTTLS=auto
 ```
 
 Se `EMAIL_ENABLED=false` ou SMTP não estiver configurado, a compra continua funcionando normalmente, mas o servidor registra que o comprovante por e-mail não foi enviado.
+
+## Atualização 4.2.1 — E-mail profissional de comprovante
+
+Esta versão melhora o e-mail pós-compra da Loja de Temas.
+
+O e-mail enviado após pagamento aprovado agora funciona como:
+
+- comprovante para emergência/suporte;
+- confirmação de liberação do tema;
+- tutorial para ativar pela aba Loja de Temas do app;
+- registro de valor pago, ID Mercado Pago e pedido;
+- data de ativação;
+- validade para assinatura/evento temporário;
+- código curto de comprovante para suporte.
+
+Importante: a entrega do tema continua vinculada à conta logada no site/app. O e-mail é usado para comprovante e suporte, não para decidir acesso ao tema.

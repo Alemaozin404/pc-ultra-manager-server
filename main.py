@@ -2062,17 +2062,47 @@ def send_transactional_email(to_email: str, subject: str, text_body: str, html_b
 
 
 def build_theme_receipt_email(order: Dict[str, Any], username: str) -> Tuple[str, str, str]:
-    theme_name = str(order.get("theme_name") or order.get("theme_id") or "Tema")
+    """Monta um e-mail premium de comprovante/tutorial para compras de temas.
+
+    O e-mail tem três funções claras:
+    1. comprovante para emergência/suporte;
+    2. tutorial de ativação no app;
+    3. agradecimento com validade, quando o item for assinatura/evento temporário.
+    """
+    theme_id = str(order.get("theme_id") or "").strip()
+    theme_name = str(order.get("theme_name") or theme_id or "Tema")
     buyer_name = str(order.get("buyer_name") or username or "cliente").strip() or "cliente"
     order_id = order.get("id")
     payment_id = order.get("payment_id") or "Não informado"
     access_type = str(order.get("access_type") or "one_time").casefold()
-    is_subscription = access_type == "subscription"
+    is_subscription = access_type == "subscription" or theme_id == "matrix_effect_subscription"
+    is_weekly_or_event = access_type in {"weekly_free", "event", "weekly_event"} or theme_id == "diamond_black_event"
     started_at = order.get("delivered_at") or order.get("payment_paid_at") or now_utc()
     expires_at = order.get("access_expires_at")
-    validity = format_dt_br(expires_at) if is_subscription else "Vitalício"
-    title_type = "Assinatura ativada" if is_subscription else "Tema liberado"
-    subject = f"{title_type}: {theme_name} — PC Ultra Manager"
+
+    if is_subscription:
+        readable_type = "Assinatura mensal"
+        title_type = "Assinatura ativada"
+        validity = format_dt_br(expires_at) if expires_at else "30 dias após a aprovação do pagamento"
+        next_action = "Renove antes do vencimento para continuar usando este tema sem interrupção."
+    elif is_weekly_or_event:
+        readable_type = "Tema de evento semanal"
+        title_type = "Tema de evento liberado"
+        validity = format_dt_br(expires_at) if expires_at else "Enquanto o evento estiver ativo ou conforme regra da loja"
+        next_action = "Se o evento acabar e o tema não tiver sido comprado permanentemente, o acesso poderá ser bloqueado."
+    else:
+        readable_type = "Compra vitalícia"
+        title_type = "Tema liberado"
+        validity = "Vitalício na conta, salvo violação de regra, reembolso ou remoção administrativa justificada"
+        next_action = "O tema continua liberado na sua conta mesmo após fechar ou reinstalar o app, desde que você faça login na mesma conta."
+
+    order_hash_raw = f"theme:{order_id}:{theme_id}:{payment_id}:{order.get('user_id')}"
+    receipt_code = hashlib.sha256(order_hash_raw.encode("utf-8", "ignore")).hexdigest()[:12].upper()
+    support_email = SMTP_SUPPORT_EMAIL if is_valid_public_email(SMTP_SUPPORT_EMAIL) else SMTP_FROM_EMAIL
+
+    subject = f"Comprovante e ativação: {theme_name} — PC Ultra Manager"
+
+    # HTML-safe values
     h_theme_name = html.escape(theme_name)
     h_buyer_name = html.escape(buyer_name)
     h_username = html.escape(str(username or ""))
@@ -2080,18 +2110,22 @@ def build_theme_receipt_email(order: Dict[str, Any], username: str) -> Tuple[str
     h_validity = html.escape(str(validity or ""))
     h_started_at = html.escape(format_dt_br(started_at))
     h_value = html.escape(format_money_br(order.get('price_cents')))
-    h_type = html.escape('Assinatura mensal' if is_subscription else 'Compra vitalícia')
+    h_type = html.escape(readable_type)
+    h_receipt_code = html.escape(receipt_code)
+    h_next_action = html.escape(next_action)
+    h_support_email = html.escape(str(support_email or ""))
 
     text_body = f"""Olá, {buyer_name}!
 
-Seu pagamento foi aprovado e o tema foi liberado na sua conta do PC Ultra Manager.
+Pagamento aprovado. O tema {theme_name} foi liberado na sua conta do PC Ultra Manager.
 
 COMPROVANTE PARA EMERGÊNCIAS
+Código do comprovante: {receipt_code}
 Pedido: #{order_id}
 Tema: {theme_name}
 Conta do app/site: {username}
-Valor: {format_money_br(order.get('price_cents'))}
-Tipo: {'Assinatura mensal' if is_subscription else 'Compra vitalícia'}
+Valor pago: {format_money_br(order.get('price_cents'))}
+Tipo: {readable_type}
 Status: aprovado e entregue
 ID do pagamento: {payment_id}
 Data da ativação: {format_dt_br(started_at)}
@@ -2100,14 +2134,25 @@ Validade: {validity}
 COMO ATIVAR O TEMA NO APP
 1. Abra o PC Ultra Manager.
 2. Faça login com a mesma conta usada na compra: {username}.
-3. Entre em Galeria de Temas.
+3. Entre na aba Loja de Temas.
 4. Clique em Sincronizar compras.
-5. Selecione o tema {theme_name} e clique em Ativar/Aplicar.
+5. Localize o tema {theme_name}.
+6. Clique em Aplicar tema.
 
-IMPORTANTE
-Guarde este e-mail. Ele serve como comprovante em caso de emergência, suporte, troca de dispositivo ou dúvida sobre validade da assinatura.
+SE NÃO APARECER NO APP
+1. Confirme se você está logado na mesma conta da compra.
+2. Clique novamente em Sincronizar compras.
+3. Feche e abra o app.
+4. Guarde este e-mail e envie o código {receipt_code} ao suporte, se precisar.
 
-Obrigado por apoiar o PC Ultra Manager. Sua compra ajuda a manter o projeto vivo, mais bonito e mais forte.
+OBSERVAÇÃO SOBRE VALIDADE
+{next_action}
+
+SUPORTE
+E-mail de suporte: {support_email or 'não configurado'}
+
+Obrigado por apoiar o PC Ultra Manager.
+Sua compra ajuda a manter o projeto vivo, mais bonito, mais seguro e mais profissional.
 
 PC Ultra Manager
 """
@@ -2116,37 +2161,49 @@ PC Ultra Manager
 <!doctype html>
 <html lang="pt-BR">
 <body style="margin:0;background:#05070d;color:#f8fafc;font-family:Arial,Helvetica,sans-serif;">
-  <div style="max-width:720px;margin:0 auto;padding:28px;">
-    <div style="border:1px solid rgba(248,250,252,.20);border-radius:24px;padding:28px;background:linear-gradient(135deg,rgba(15,23,42,.96),rgba(2,6,23,.96));box-shadow:0 24px 60px rgba(0,0,0,.45);">
-      <p style="margin:0 0 8px;color:#93c5fd;font-size:13px;letter-spacing:.12em;text-transform:uppercase;">PC Ultra Manager</p>
-      <h1 style="margin:0 0 10px;font-size:28px;">{html.escape(title_type)}: {h_theme_name}</h1>
-      <p style="margin:0 0 22px;color:#cbd5e1;line-height:1.6;">Olá, {h_buyer_name}. Seu pagamento foi aprovado e o tema foi liberado na sua conta.</p>
-
-      <div style="border:1px solid rgba(255,255,255,.14);border-radius:18px;padding:18px;margin:18px 0;background:rgba(255,255,255,.05);">
-        <h2 style="margin:0 0 12px;font-size:18px;">Comprovante para emergências</h2>
-        <p><b>Pedido:</b> #{order_id}</p>
-        <p><b>Tema:</b> {h_theme_name}</p>
-        <p><b>Conta:</b> {h_username}</p>
-        <p><b>Valor:</b> {h_value}</p>
-        <p><b>Tipo:</b> {h_type}</p>
-        <p><b>ID do pagamento:</b> {h_payment_id}</p>
-        <p><b>Data da ativação:</b> {h_started_at}</p>
-        <p><b>Validade:</b> {h_validity}</p>
+  <div style="max-width:760px;margin:0 auto;padding:28px;">
+    <div style="border:1px solid rgba(248,250,252,.18);border-radius:28px;padding:0;background:linear-gradient(135deg,rgba(15,23,42,.98),rgba(2,6,23,.98));box-shadow:0 28px 80px rgba(0,0,0,.52);overflow:hidden;">
+      <div style="padding:28px;background:radial-gradient(circle at 20% 0%,rgba(125,211,252,.20),transparent 34%),radial-gradient(circle at 82% 8%,rgba(185,154,91,.20),transparent 32%);border-bottom:1px solid rgba(255,255,255,.10);">
+        <p style="margin:0 0 8px;color:#93c5fd;font-size:12px;letter-spacing:.16em;text-transform:uppercase;">PC Ultra Manager • Loja de Temas</p>
+        <h1 style="margin:0 0 10px;font-size:30px;line-height:1.18;color:#ffffff;">{html.escape(title_type)}: {h_theme_name}</h1>
+        <p style="margin:0;color:#cbd5e1;line-height:1.6;">Olá, <b>{h_buyer_name}</b>. Seu pagamento foi aprovado e o tema foi liberado na conta <b>{h_username}</b>.</p>
       </div>
 
-      <div style="border:1px solid rgba(125,211,252,.22);border-radius:18px;padding:18px;margin:18px 0;background:rgba(14,165,233,.08);">
-        <h2 style="margin:0 0 12px;font-size:18px;">Como ativar no app</h2>
-        <ol style="line-height:1.8;color:#e2e8f0;">
-          <li>Abra o PC Ultra Manager.</li>
-          <li>Faça login com a mesma conta usada na compra: <b>{h_username}</b>.</li>
-          <li>Entre em <b>Galeria de Temas</b>.</li>
-          <li>Clique em <b>Sincronizar compras</b>.</li>
-          <li>Selecione <b>{h_theme_name}</b> e clique em ativar/aplicar.</li>
-        </ol>
-      </div>
+      <div style="padding:28px;">
+        <div style="border:1px solid rgba(255,255,255,.14);border-radius:20px;padding:20px;margin:0 0 18px;background:rgba(255,255,255,.055);">
+          <h2 style="margin:0 0 14px;font-size:19px;color:#ffffff;">Comprovante para emergências</h2>
+          <table style="width:100%;border-collapse:collapse;color:#e2e8f0;font-size:14px;">
+            <tr><td style="padding:7px 0;color:#94a3b8;">Código</td><td style="padding:7px 0;text-align:right;"><b>{h_receipt_code}</b></td></tr>
+            <tr><td style="padding:7px 0;color:#94a3b8;">Pedido</td><td style="padding:7px 0;text-align:right;">#{order_id}</td></tr>
+            <tr><td style="padding:7px 0;color:#94a3b8;">Tema</td><td style="padding:7px 0;text-align:right;">{h_theme_name}</td></tr>
+            <tr><td style="padding:7px 0;color:#94a3b8;">Conta</td><td style="padding:7px 0;text-align:right;">{h_username}</td></tr>
+            <tr><td style="padding:7px 0;color:#94a3b8;">Valor pago</td><td style="padding:7px 0;text-align:right;">{h_value}</td></tr>
+            <tr><td style="padding:7px 0;color:#94a3b8;">Tipo</td><td style="padding:7px 0;text-align:right;">{h_type}</td></tr>
+            <tr><td style="padding:7px 0;color:#94a3b8;">ID Mercado Pago</td><td style="padding:7px 0;text-align:right;">{h_payment_id}</td></tr>
+            <tr><td style="padding:7px 0;color:#94a3b8;">Ativação</td><td style="padding:7px 0;text-align:right;">{h_started_at}</td></tr>
+            <tr><td style="padding:7px 0;color:#94a3b8;">Validade</td><td style="padding:7px 0;text-align:right;"><b>{h_validity}</b></td></tr>
+          </table>
+        </div>
 
-      <p style="color:#cbd5e1;line-height:1.6;">Guarde este e-mail. Ele serve como comprovante em caso de emergência, suporte, troca de dispositivo ou dúvida sobre validade da assinatura.</p>
-      <p style="margin-top:22px;color:#f8fafc;"><b>Obrigado por apoiar o PC Ultra Manager.</b><br>Sua compra ajuda a manter o projeto vivo, mais bonito e mais forte.</p>
+        <div style="border:1px solid rgba(125,211,252,.24);border-radius:20px;padding:20px;margin:18px 0;background:rgba(14,165,233,.08);">
+          <h2 style="margin:0 0 14px;font-size:19px;color:#ffffff;">Como ativar no app</h2>
+          <ol style="line-height:1.9;color:#e2e8f0;margin:0;padding-left:22px;">
+            <li>Abra o <b>PC Ultra Manager</b>.</li>
+            <li>Faça login com a mesma conta da compra: <b>{h_username}</b>.</li>
+            <li>Entre na aba <b>Loja de Temas</b>.</li>
+            <li>Clique em <b>Sincronizar compras</b>.</li>
+            <li>Localize <b>{h_theme_name}</b> e clique em <b>Aplicar tema</b>.</li>
+          </ol>
+        </div>
+
+        <div style="border:1px solid rgba(185,154,91,.28);border-radius:20px;padding:18px;margin:18px 0;background:rgba(185,154,91,.08);">
+          <h2 style="margin:0 0 10px;font-size:18px;color:#ffffff;">Validade e suporte</h2>
+          <p style="margin:0 0 12px;color:#e2e8f0;line-height:1.65;">{h_next_action}</p>
+          <p style="margin:0;color:#cbd5e1;line-height:1.65;">Guarde este e-mail. Em caso de suporte, informe o código <b>{h_receipt_code}</b>{' para ' + h_support_email if h_support_email else ''}.</p>
+        </div>
+
+        <p style="margin:22px 0 0;color:#f8fafc;line-height:1.6;"><b>Obrigado por apoiar o PC Ultra Manager.</b><br>Sua compra ajuda a manter o projeto vivo, mais bonito, mais seguro e mais profissional.</p>
+      </div>
     </div>
   </div>
 </body>
