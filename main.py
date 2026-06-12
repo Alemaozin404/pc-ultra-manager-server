@@ -44,7 +44,7 @@ from sqlalchemy.exc import IntegrityError
 # CONFIGURAÇÃO PRINCIPAL
 # ==================================================
 
-APP_VERSION = "4.2.3-diamond-weekly-event-permanent"
+APP_VERSION = "4.2.4-weekly-event-auto-rotation"
 DEFAULT_DATABASE_URL = "sqlite:///./database.db"
 SAFE_DEV_ADMIN_PASSWORD = "admin123456"
 SAFE_DEV_JWT_SECRET = "dev-only-change-this-secret-local-000000000000"
@@ -490,6 +490,76 @@ DEFAULT_THEME_CATALOG = [
         "is_active": True,
     },
     {
+        "id": "arctic_neon_weekly",
+        "name": "Arctic Neon",
+        "description": "Tema de evento semanal com neon azul gelo, fundo escuro glacial, linhas cristalinas e brilho técnico futurista. Aparece somente na aba Evento Semanal; quem compra recebe acesso permanente.",
+        "price_cents": 250,
+        "preview_url": "",
+        "accent_color": "#7DD3FC",
+        "category": "evento semanal",
+        "access_type": "event_sale",
+        "duration_days": None,
+        "duration_label": "Compra permanente",
+        "event_label": "Tema de evento semanal • disponível por 7 dias • acesso permanente após compra",
+        "is_active": True,
+    },
+    {
+        "id": "crimson_cyber_weekly",
+        "name": "Crimson Cyber",
+        "description": "Tema de evento semanal com vermelho cyber, preto profundo, contornos agressivos e atmosfera gamer premium. Aparece somente na aba Evento Semanal; quem compra recebe acesso permanente.",
+        "price_cents": 250,
+        "preview_url": "",
+        "accent_color": "#FF315A",
+        "category": "evento semanal",
+        "access_type": "event_sale",
+        "duration_days": None,
+        "duration_label": "Compra permanente",
+        "event_label": "Tema de evento semanal • disponível por 7 dias • acesso permanente após compra",
+        "is_active": True,
+    },
+    {
+        "id": "royal_gold_weekly",
+        "name": "Royal Gold",
+        "description": "Tema de evento semanal com dourado nobre, fundo preto luxo, bordas premium e sensação de painel executivo. Aparece somente na aba Evento Semanal; quem compra recebe acesso permanente.",
+        "price_cents": 250,
+        "preview_url": "",
+        "accent_color": "#F6C65B",
+        "category": "evento semanal",
+        "access_type": "event_sale",
+        "duration_days": None,
+        "duration_label": "Compra permanente",
+        "event_label": "Tema de evento semanal • disponível por 7 dias • acesso permanente após compra",
+        "is_active": True,
+    },
+    {
+        "id": "purple_galaxy_weekly",
+        "name": "Purple Galaxy",
+        "description": "Tema de evento semanal com roxo cósmico, brilho de galáxia, fundo espacial e cards com profundidade cinematográfica. Aparece somente na aba Evento Semanal; quem compra recebe acesso permanente.",
+        "price_cents": 250,
+        "preview_url": "",
+        "accent_color": "#A855F7",
+        "category": "evento semanal",
+        "access_type": "event_sale",
+        "duration_days": None,
+        "duration_label": "Compra permanente",
+        "event_label": "Tema de evento semanal • disponível por 7 dias • acesso permanente após compra",
+        "is_active": True,
+    },
+    {
+        "id": "emerald_obsidian_weekly",
+        "name": "Emerald Obsidian",
+        "description": "Tema de evento semanal com verde esmeralda, preto obsidiana, reflexos minerais e aura técnica elegante. Aparece somente na aba Evento Semanal; quem compra recebe acesso permanente.",
+        "price_cents": 250,
+        "preview_url": "",
+        "accent_color": "#34D399",
+        "category": "evento semanal",
+        "access_type": "event_sale",
+        "duration_days": None,
+        "duration_label": "Compra permanente",
+        "event_label": "Tema de evento semanal • disponível por 7 dias • acesso permanente após compra",
+        "is_active": True,
+    },
+    {
         "id": "matrix_effect_subscription",
         "name": "Matrix Effect",
         "description": "Tema estilo Matrix com chuva de códigos, brilho verde digital, atmosfera hacker/cyber e efeito visual de terminal futurista. Assinatura mensal: custa R$ 0,50 e precisa renovar a cada 30 dias.",
@@ -503,6 +573,17 @@ DEFAULT_THEME_CATALOG = [
         "is_active": True,
     },
 ]
+
+
+WEEKLY_EVENT_THEME_IDS = [
+    "arctic_neon_weekly",
+    "crimson_cyber_weekly",
+    "royal_gold_weekly",
+    "purple_galaxy_weekly",
+    "emerald_obsidian_weekly",
+]
+WEEKLY_EVENT_ANCHOR = datetime(2026, 1, 5, tzinfo=timezone.utc)  # Segunda-feira fixa para rotação estável.
+WEEKLY_EVENT_PRICE_CENTS = 250
 
 
 
@@ -684,6 +765,36 @@ def serialize_dt(value: Optional[datetime]) -> Optional[str]:
 
 def row_dict(row: Any) -> Dict[str, Any]:
     return dict(row._mapping if hasattr(row, "_mapping") else row)
+
+
+def get_optional_user_by_token(authorization: Optional[str] = Header(default=None)) -> Optional[Dict[str, Any]]:
+    if not authorization:
+        return None
+    try:
+        raw = str(authorization or "").strip()
+        if raw.lower().startswith("bearer "):
+            raw = raw.split(" ", 1)[1].strip()
+        if not raw:
+            return None
+        hashed = token_hash(raw)
+        with engine.begin() as conn:
+            result = conn.execute(
+                select(users, sessions.c.expires_at.label("session_expires_at"))
+                .select_from(sessions.join(users, users.c.id == sessions.c.user_id))
+                .where(sessions.c.token_hash == hashed)
+            ).first()
+            if result is None:
+                return None
+            data = row_dict(result)
+            expires_at = data.get("session_expires_at")
+            if expires_at and expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at and expires_at <= now_utc():
+                conn.execute(sessions.delete().where(sessions.c.token_hash == hashed))
+                return None
+            return data
+    except Exception:
+        return None
 
 
 def is_admin(user: Dict[str, Any]) -> bool:
@@ -1061,7 +1172,7 @@ def ensure_schema_updates() -> None:
             "UPDATE themes SET access_type = 'one_time' WHERE access_type IS NULL",
             "UPDATE themes SET duration_label = 'Vitalício' WHERE duration_label IS NULL AND COALESCE(access_type, 'one_time') <> 'subscription'",
             "UPDATE themes SET access_type = 'subscription', duration_days = 30, duration_label = '30 dias', category = 'assinatura', price_cents = 50 WHERE id = 'matrix_effect_subscription'",
-            "UPDATE themes SET access_type = 'one_time', duration_days = NULL, duration_label = 'Compra permanente', category = 'evento semanal', price_cents = 250, event_label = 'Disponível por 7 dias na loja; acesso permanente após compra' WHERE id = 'diamond_black_event'",
+            "UPDATE themes SET access_type = 'event_sale', duration_days = NULL, duration_label = 'Compra permanente', category = 'evento semanal', price_cents = 250, event_label = 'Evento semanal: disponível apenas na aba exclusiva; acesso permanente após compra' WHERE id IN ('diamond_black_event','arctic_neon_weekly','crimson_cyber_weekly','royal_gold_weekly','purple_galaxy_weekly','emerald_obsidian_weekly')",
             "UPDATE user_themes SET status = 'active' WHERE status IS NULL",
             "UPDATE user_themes SET expires_at = purchased_at + INTERVAL '30 days' WHERE theme_id = 'matrix_effect_subscription' AND expires_at IS NULL",
             "UPDATE user_themes SET expires_at = NULL WHERE theme_id = 'diamond_black_event'",
@@ -1124,7 +1235,7 @@ def ensure_schema_updates() -> None:
             conn.execute(text("UPDATE themes SET access_type = 'one_time' WHERE access_type IS NULL"))
             conn.execute(text("UPDATE themes SET duration_label = 'Vitalício' WHERE duration_label IS NULL AND COALESCE(access_type, 'one_time') <> 'subscription'"))
             conn.execute(text("UPDATE themes SET access_type = 'subscription', duration_days = 30, duration_label = '30 dias', category = 'assinatura', price_cents = 50 WHERE id = 'matrix_effect_subscription'"))
-            conn.execute(text("UPDATE themes SET access_type = 'one_time', duration_days = NULL, duration_label = 'Compra permanente', category = 'evento semanal', price_cents = 250, event_label = 'Disponível por 7 dias na loja; acesso permanente após compra' WHERE id = 'diamond_black_event'"))
+            conn.execute(text("UPDATE themes SET access_type = 'event_sale', duration_days = NULL, duration_label = 'Compra permanente', category = 'evento semanal', price_cents = 250, event_label = 'Evento semanal: disponível apenas na aba exclusiva; acesso permanente após compra' WHERE id IN ('diamond_black_event','arctic_neon_weekly','crimson_cyber_weekly','royal_gold_weekly','purple_galaxy_weekly','emerald_obsidian_weekly')"))
             conn.execute(text("UPDATE user_themes SET status = 'active' WHERE status IS NULL"))
             conn.execute(text("UPDATE user_themes SET expires_at = datetime(purchased_at, '+30 days') WHERE theme_id = 'matrix_effect_subscription' AND expires_at IS NULL"))
             conn.execute(text("UPDATE user_themes SET expires_at = NULL WHERE theme_id = 'diamond_black_event'"))
@@ -2096,7 +2207,7 @@ def build_theme_receipt_email(order: Dict[str, Any], username: str) -> Tuple[str
     payment_id = order.get("payment_id") or "Não informado"
     access_type = str(order.get("access_type") or "one_time").casefold()
     is_subscription = access_type == "subscription" or theme_id == "matrix_effect_subscription"
-    is_event_sale_permanent = theme_id == "diamond_black_event"
+    is_event_sale_permanent = theme_id == "diamond_black_event" or theme_id in WEEKLY_EVENT_THEME_IDS or access_type in {"event_sale", "weekly_event_sale"}
     is_weekly_or_event = access_type in {"weekly_free", "event", "weekly_event"} and not is_event_sale_permanent
     started_at = order.get("delivered_at") or order.get("payment_paid_at") or now_utc()
     expires_at = order.get("access_expires_at")
@@ -2453,6 +2564,33 @@ def normalize_theme_id(theme_id: str) -> str:
     return value
 
 
+def theme_is_auto_weekly_event(theme: Dict[str, Any]) -> bool:
+    return str(row_dict(theme).get("id") or "").strip() in WEEKLY_EVENT_THEME_IDS
+
+
+def weekly_event_window(reference: Optional[datetime] = None) -> Tuple[datetime, datetime, int]:
+    ref = reference or now_utc()
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    else:
+        ref = ref.astimezone(timezone.utc)
+    # Início da semana sempre na segunda-feira 00:00 UTC.
+    start = (ref - timedelta(days=ref.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    weeks = max(0, int((start - WEEKLY_EVENT_ANCHOR).days // 7))
+    end = start + timedelta(days=7)
+    return start, end, weeks
+
+
+def current_weekly_event_theme_id(reference: Optional[datetime] = None) -> str:
+    _, _, weeks = weekly_event_window(reference)
+    return WEEKLY_EVENT_THEME_IDS[weeks % len(WEEKLY_EVENT_THEME_IDS)]
+
+
+def is_current_weekly_event_theme(theme: Dict[str, Any], reference: Optional[datetime] = None) -> bool:
+    data = row_dict(theme)
+    return theme_is_auto_weekly_event(data) and str(data.get("id")) == current_weekly_event_theme_id(reference)
+
+
 def theme_access_type(theme: Dict[str, Any]) -> str:
     """Retorna o tipo de ACESSO do usuário após compra.
 
@@ -2465,19 +2603,28 @@ def theme_access_type(theme: Dict[str, Any]) -> str:
         return "subscription"
     if raw in {"weekly_free"}:
         return "weekly_event"
+    # Evento semanal vendido por PIX é PERMANENTE para quem compra.
+    # A rotação semanal controla somente a disponibilidade na aba exclusiva do site.
+    if raw in {"event_sale", "weekly_event_sale"} or theme_id in WEEKLY_EVENT_THEME_IDS:
+        return "one_time"
     return "one_time"
 
 
 def theme_is_weekly_event_display(theme: Dict[str, Any]) -> bool:
-    theme_id = str(theme.get("id") or "").strip()
-    category = str(theme.get("category") or "").strip().casefold()
-    raw = str(theme.get("access_type") or "").strip().casefold()
-    return theme_id == "diamond_black_event" or "evento" in category or raw in {"event_sale", "weekly_event_sale"}
+    data = row_dict(theme)
+    theme_id = str(data.get("id") or "").strip()
+    category = str(data.get("category") or "").strip().casefold()
+    raw = str(data.get("access_type") or "").strip().casefold()
+    return theme_id == "diamond_black_event" or theme_id in WEEKLY_EVENT_THEME_IDS or "evento" in category or raw in {"event_sale", "weekly_event_sale"}
 
 
 def theme_is_listed_for_sale(theme: Dict[str, Any]) -> bool:
     data = row_dict(theme)
     if not bool(data.get("is_active")):
+        return False
+    # Temas do evento semanal automático NÃO aparecem na loja normal.
+    # Eles aparecem apenas no endpoint /themes/weekly-event e na aba exclusiva do site.
+    if theme_is_auto_weekly_event(data):
         return False
     if theme_is_weekly_event_display(data):
         starts_at = normalize_dt(data.get("event_starts_at"))
@@ -2488,6 +2635,15 @@ def theme_is_listed_for_sale(theme: Dict[str, Any]) -> bool:
         if ends_at and now >= ends_at:
             return False
     return True
+
+
+def theme_is_buyable(theme: Dict[str, Any]) -> bool:
+    data = row_dict(theme)
+    if not bool(data.get("is_active")):
+        return False
+    if theme_is_auto_weekly_event(data):
+        return is_current_weekly_event_theme(data)
+    return theme_is_listed_for_sale(data)
 
 
 def theme_duration_days(theme: Dict[str, Any]) -> Optional[int]:
@@ -2719,7 +2875,7 @@ def deliver_theme_order(conn, order: Dict[str, Any], message: str = "Pagamento a
     receipt_email = send_theme_receipt_email(conn, email_order)
     if granted.get("access_type") == "subscription":
         log_msg = f"assinatura_30d theme={order['theme_id']}; pedido_tema={order['id']}; expira={expires_at}; {message}"
-    elif str(order.get("theme_id")) == "diamond_black_event":
+    elif str(order.get("theme_id")) == "diamond_black_event" or str(order.get("theme_id")) in WEEKLY_EVENT_THEME_IDS:
         log_msg = f"evento_semanal_permanente theme={order['theme_id']}; pedido_tema={order['id']}; acesso_permanente; {message}"
     elif granted.get("access_type") == "weekly_event":
         log_msg = f"tema_semanal_temporario theme={order['theme_id']}; pedido_tema={order['id']}; expira={expires_at}; {message}"
@@ -2761,6 +2917,35 @@ def list_theme_store():
         ).fetchall()
     visible = [row for row in rows if theme_is_listed_for_sale(row_dict(row))]
     return {"themes": [serialize_theme(row) for row in visible]}
+
+
+@app.get("/themes/weekly-event")
+def current_weekly_event_theme(user: Optional[Dict[str, Any]] = Depends(get_optional_user_by_token)):
+    start, end, weeks = weekly_event_window()
+    active_id = current_weekly_event_theme_id()
+    with engine.connect() as conn:
+        row = conn.execute(select(themes).where(themes.c.id == active_id, themes.c.is_active == True)).first()  # noqa: E712
+        if not row:
+            raise HTTPException(status_code=404, detail="Tema semanal não configurado")
+        entitlement = None
+        owned = False
+        if user:
+            entitlement = get_user_theme_entitlement(conn, int(user["id"]), active_id)
+            owned = bool(entitlement and entitlement_is_active(entitlement))
+    theme = serialize_theme(row, owned=owned, entitlement=entitlement)
+    theme.update({
+        "is_weekly_event": True,
+        "weekly_event": True,
+        "event_starts_at": serialize_dt(start),
+        "event_ends_at": serialize_dt(end),
+        "next_rotation_at": serialize_dt(end),
+        "rotation_label": "Troca automática toda segunda-feira",
+        "event_label": "Disponível somente esta semana na aba Evento Semanal. Quem comprar fica com acesso permanente.",
+        "week_index": weeks,
+        "pool_count": len(WEEKLY_EVENT_THEME_IDS),
+        "hidden_from_main_store": True,
+    })
+    return {"theme": theme, "week_start": serialize_dt(start), "week_end": serialize_dt(end), "next_rotation_at": serialize_dt(end), "pool_count": len(WEEKLY_EVENT_THEME_IDS)}
 
 
 @app.get("/themes/my")
@@ -2817,8 +3002,8 @@ def purchase_theme(data: ThemePurchaseRequest, user: Dict[str, Any] = Depends(ge
         access_type = theme_access_type(theme)
         if existing_entitlement and access_type != "subscription" and entitlement_is_active(existing_entitlement):
             return {"message": "Tema já liberado na sua conta", "owned": True, "theme": serialize_theme(theme, owned=True, entitlement=existing_entitlement)}
-        if not theme_is_listed_for_sale(theme):
-            raise HTTPException(status_code=400, detail="Este tema de evento não está disponível na loja agora. Quem já comprou continua com acesso permanente.")
+        if not theme_is_buyable(theme):
+            raise HTTPException(status_code=400, detail="Este tema de evento semanal não está disponível para compra nesta semana. Quem já comprou continua com acesso permanente.")
 
         recent_orders = int(conn.execute(
             select(func.count()).select_from(theme_orders).where(
